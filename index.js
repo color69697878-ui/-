@@ -1,5 +1,5 @@
 import express from "express";
-import line from "@line/bot-sdk";
+const line = require('@line/bot-sdk');
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import fs from "fs";
@@ -115,3 +115,4 @@ async function handleEvent(event) {
 }
 
 app.listen(3000, () => console.log("BOT RUNNING"));
+
