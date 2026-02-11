@@ -180,11 +180,14 @@ async function handleEvent(event) {
   }
 
 
-  /* ======================================================
-     ⭐ 群組 / 房間 白名單限制
-  ====================================================== */
+  /* ===== 群組 / 房間 白名單 ===== */
 
-  if (placeId && !allowedGroups.includes(placeId)) {
+if (event.source.type === "group" || event.source.type === "room") {
+
+  const id = event.source.groupId || event.source.roomId;
+
+  // ⭐ 允許 OWNER 在未授權群組操作
+  if (!allowedGroups.includes(id) && event.source.userId !== OWNER) {
 
     await client.replyMessage(event.replyToken, {
       type: "text",
@@ -192,13 +195,15 @@ async function handleEvent(event) {
     });
 
     if (event.source.type === "group") {
-      await client.leaveGroup(placeId);
-    } else if (event.source.type === "room") {
-      await client.leaveRoom(placeId);
+      await client.leaveGroup(id);
+    } else {
+      await client.leaveRoom(id);
     }
 
     return;
   }
+}
+
 
 
   /* ======================================================
@@ -235,3 +240,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("BOT RUNNING ON " + PORT);
 });
+
