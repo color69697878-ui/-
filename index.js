@@ -1,4 +1,14 @@
-require("dotenv").config();
+import dotenv from "dotenv";
+dotenv.config();
+import express from "express";
+import * as line from "@line/bot-sdk";
+import OpenAI from "openai";
+import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+
+dotenv.config();
+
 
 const express = require("express");
 const line = require("@line/bot-sdk");
@@ -175,3 +185,4 @@ function reply(event, text) {
 ========================= */
 
 app.listen(process.env.PORT || 3000);
+
