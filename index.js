@@ -105,8 +105,13 @@ async function handleEvent(event) {
     if (!allowedGroups.includes(id)) {
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: "❌ 此群組未授權"
-      });
+        if (event.type === "join") {
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: "此群尚未授權\n請管理員輸入 /addgroup"
+  });
+}
+
 
       if (event.source.type === "group") {
         await client.leaveGroup(id);
@@ -240,4 +245,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("BOT RUNNING ON " + PORT);
 });
+
 
