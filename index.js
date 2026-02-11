@@ -1,5 +1,5 @@
 import express from "express";
-const line = require('@line/bot-sdk');
+import * as line from '@line/bot-sdk';
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import fs from "fs";
@@ -119,6 +119,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("BOT RUNNING ON " + PORT);
 });
+
 
 
 
