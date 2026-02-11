@@ -1,125 +1,177 @@
-import express from "express";
-import * as line from '@line/bot-sdk';
-import OpenAI from "openai";
-import dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
+require("dotenv").config();
 
-dotenv.config();
+const express = require("express");
+const line = require("@line/bot-sdk");
+const OpenAI = require("openai");
 
 const app = express();
 
-/* LINE */
+/* =========================
+   LINE
+========================= */
+
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
+  channelSecret: process.env.LINE_CHANNEL_SECRET
 };
 
 const client = new line.Client(config);
 
-/* OpenAI */
+/* =========================
+   OpenAI
+========================= */
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY
 });
 
-/* 使用者語言模式 */
-const userLang = new Map();
+/* =========================
+   白名單
+========================= */
 
-/* 語言判斷 */
-function detectLang(text) {
-  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
-  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
-  return "en";
+const OWNER = process.env.OWNER_USER_ID;
+
+let allowedGroups = process.env.ALLOWED_GROUPS
+  ? process.env.ALLOWED_GROUPS.split(",").filter(Boolean)
+  : [];
+
+function saveGroups() {
+  process.env.ALLOWED_GROUPS = allowedGroups.join(",");
 }
 
-function targetLang(source, mode) {
-  if (mode && mode !== "auto") return mode;
-  if (source === "th") return "繁體中文";
-  if (source === "zh") return "泰文";
-  return "繁體中文";
-}
+/* =========================
+   Webhook
+========================= */
 
-/* 翻譯 */
-async function translate(text, lang) {
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: `翻譯成${lang}，只輸出翻譯` },
-      { role: "user", content: text }
-    ]
-  });
-  return r.choices[0].message.content.trim();
-}
-
-/* webhook */
 app.post("/webhook", line.middleware(config), async (req, res) => {
   await Promise.all(req.body.events.map(handleEvent));
   res.sendStatus(200);
 });
 
+/* =========================
+   主事件
+========================= */
+
 async function handleEvent(event) {
-  if (event.type !== "message") return;
 
-  const userId = event.source.userId || event.source.groupId;
+  /* ===== 被加入群組 ===== */
 
-  /* 文字 */
-  if (event.message.type === "text") {
-    const text = event.message.text;
+  if (event.type === "join") {
 
-    if (text.startsWith("/lang")) {
-      const mode = text.split(" ")[1] || "auto";
-      userLang.set(userId, mode);
-      return client.replyMessage(event.replyToken, {
+    const id = event.source.groupId || event.source.roomId;
+
+    if (!allowedGroups.includes(id)) {
+
+      await client.replyMessage(event.replyToken, {
         type: "text",
-        text: `語言模式：${mode}`
+        text: "❌ 此群組未授權"
       });
+
+      if (event.source.type === "group")
+        await client.leaveGroup(id);
+      else
+        await client.leaveRoom(id);
     }
 
-    const source = detectLang(text);
-    const mode = userLang.get(userId) || "auto";
-    const target = targetLang(source, mode);
-    const result = await translate(text, target);
-
-    return client.replyMessage(event.replyToken, {
-      type: "text",
-      text: `原文：${text}\n翻譯：${result}`
-    });
+    return;
   }
 
-  /* 語音 */
-  if (event.message.type === "audio") {
-    const stream = await client.getMessageContent(event.message.id);
-    const file = `/tmp/${event.message.id}.m4a`;
-    const w = fs.createWriteStream(file);
+  /* ===== 只處理文字 ===== */
 
-    await new Promise((resolve) => {
-      stream.pipe(w);
-      stream.on("end", resolve);
-    });
+  if (event.type !== "message") return;
+  if (event.message.type !== "text") return;
 
-    const t = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(file),
-      model: "gpt-4o-mini-transcribe"
-    });
+  const text = event.message.text;
 
-    const source = detectLang(t.text);
-    const mode = userLang.get(userId) || "auto";
-    const target = targetLang(source, mode);
-    const result = await translate(t.text, target);
+  /* ===== 指令優先 ===== */
 
-    return client.replyMessage(event.replyToken, {
-      type: "text",
-      text: `語音：${t.text}\n翻譯：${result}`
-    });
+  if (text === "/myid")
+    return reply(event, "你的UserID:\n" + event.source.userId);
+
+  if (text === "/groupid") {
+    if (event.source.type === "group")
+      return reply(event, "群組ID:\n" + event.source.groupId);
+    else
+      return reply(event, "請在群組使用");
   }
+
+  /* ===== 白名單檢查 ===== */
+
+  if (event.source.type === "group" || event.source.type === "room") {
+
+    const id = event.source.groupId || event.source.roomId;
+
+    if (!allowedGroups.includes(id))
+      return; // 直接無視（已授權才可用）
+  }
+
+  /* ===== 管理指令 ===== */
+
+  if (event.source.userId === OWNER) {
+
+    if (text === "/addgroup") {
+
+      const id = event.source.groupId || event.source.roomId;
+
+      if (!allowedGroups.includes(id)) {
+        allowedGroups.push(id);
+        saveGroups();
+      }
+
+      return reply(event, "✅ 已授權");
+    }
+
+    if (text === "/removegroup") {
+
+      const id = event.source.groupId || event.source.roomId;
+
+      allowedGroups = allowedGroups.filter(g => g !== id);
+      saveGroups();
+
+      return reply(event, "🗑 已移除");
+    }
+
+    if (text === "/groups")
+      return reply(event, "白名單數量：" + allowedGroups.length);
+  }
+
+  /* ===== 翻譯 ===== */
+
+  const result = await translate(text, "繁體中文");
+  return reply(event, result);
 }
 
-const PORT = process.env.PORT || 3000;
+/* =========================
+   翻譯
+========================= */
 
-app.listen(PORT, () => {
-  console.log("BOT RUNNING ON " + PORT);
-});
+async function translate(text, lang) {
 
+  const r = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    messages: [
+      { role: "system", content: "你是翻譯引擎，只輸出翻譯" },
+      { role: "user", content: `翻譯成${lang}：${text}` }
+    ]
+  });
 
+  return r.choices[0].message.content.trim();
+}
 
+/* =========================
+   reply
+========================= */
 
+function reply(event, text) {
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text
+  });
+}
+
+/* =========================
+   start
+========================= */
+
+app.listen(process.env.PORT || 3000);
