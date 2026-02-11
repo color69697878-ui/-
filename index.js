@@ -114,5 +114,11 @@ async function handleEvent(event) {
   }
 }
 
-app.listen(3000, () => console.log("BOT RUNNING"));
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("BOT RUNNING ON " + PORT);
+});
+
+
 
