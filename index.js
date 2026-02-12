@@ -145,18 +145,19 @@ async function handleEvent(event) {
 
   if (event.type === "join") {
 
-    const id = getGroupOrRoomId(event);
+  const id = getGroupOrRoomId(event);
 
-    if (!isAllowed(id)) {
-      await reply(event, "❌ 此群組未授權");
-
-      if (event.source.type === "group")
-        await client.leaveGroup(id);
-      else
-        await client.leaveRoom(id);
-    }
-    return;
+  if (!isAllowed(id)) {
+    await reply(event,
+      "⚠️ 此群組尚未授權\n\n" +
+      "請管理員輸入：\n" +
+      "/addgroup"
+    );
   }
+
+  return;
+}
+
 
   /* ======================
      非訊息忽略
@@ -255,3 +256,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON " + PORT);
 });
+
