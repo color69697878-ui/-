@@ -34,21 +34,23 @@ const openai = new OpenAI({
 const OWNER = process.env.OWNER_USER_ID;
 
 /* =========================
-   白名單永久儲存
+   資料庫
 ========================= */
 
-const DB_FILE = "./allowedGroups.json";
+const DB = "./groups.json";
 
-function loadGroups() {
-  if (!fs.existsSync(DB_FILE)) return [];
-  return JSON.parse(fs.readFileSync(DB_FILE));
+function loadDB() {
+  if (!fs.existsSync(DB))
+    return { allowed: [], pending: [] };
+
+  return JSON.parse(fs.readFileSync(DB));
 }
 
-function saveGroups(groups) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(groups, null, 2));
+function saveDB(data) {
+  fs.writeFileSync(DB, JSON.stringify(data, null, 2));
 }
 
-let allowedGroups = loadGroups();
+let db = loadDB();
 
 /* =========================
    工具
@@ -65,28 +67,38 @@ function getId(event) {
   return event.source.groupId || event.source.roomId;
 }
 
-function isGroupOrRoom(event) {
+function isGroup(event) {
   return event.source.type === "group" || event.source.type === "room";
 }
 
 function isAllowed(id) {
-  return allowedGroups.includes(id);
+  return db.allowed.includes(id);
 }
 
-function addGroup(id) {
-  if (!allowedGroups.includes(id)) {
-    allowedGroups.push(id);
-    saveGroups(allowedGroups);
+function isPending(id) {
+  return db.pending.includes(id);
+}
+
+function addPending(id) {
+  if (!isPending(id)) {
+    db.pending.push(id);
+    saveDB(db);
   }
 }
 
-function removeGroup(id) {
-  allowedGroups = allowedGroups.filter(g => g !== id);
-  saveGroups(allowedGroups);
+function approve(id) {
+  db.pending = db.pending.filter(x => x !== id);
+  if (!db.allowed.includes(id)) db.allowed.push(id);
+  saveDB(db);
+}
+
+function reject(id) {
+  db.pending = db.pending.filter(x => x !== id);
+  saveDB(db);
 }
 
 /* =========================
-   語言偵測
+   翻譯
 ========================= */
 
 function detectLang(text) {
@@ -101,20 +113,15 @@ function targetLang(source) {
   return "繁體中文";
 }
 
-/* =========================
-   翻譯
-========================= */
-
 async function translate(text, lang) {
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
     messages: [
-      { role: "system", content: "你是翻譯引擎，只輸出翻譯" },
+      { role: "system", content: "只輸出翻譯" },
       { role: "user", content: `翻譯成${lang}：${text}` }
     ]
   });
-
   return r.choices[0].message.content.trim();
 }
 
@@ -133,98 +140,75 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
 async function handleEvent(event) {
 
-  /* ======================
-     BOT 被加入群組
-  ====================== */
+  /* ===== BOT 加入群 ===== */
 
   if (event.type === "join") {
 
     const id = getId(event);
 
     if (!isAllowed(id)) {
+      addPending(id);
 
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "❌ 此群組未授權\n請群主輸入 /addgroup 授權"
-      });
+      return reply(event,
+`🔐 此群組尚未授權
+請群組管理員輸入：
 
-      if (event.source.type === "group")
-        await client.leaveGroup(id);
-      else
-        await client.leaveRoom(id);
+/approve
+
+完成授權`);
     }
 
-    return;
+    return reply(event, "✅ 此群組已授權");
   }
 
-  /* ======================
-     只處理文字訊息
-  ====================== */
+  /* ===== 非文字忽略 ===== */
 
   if (event.type !== "message") return;
   if (event.message.type !== "text") return;
 
   const text = event.message.text.trim();
   const userId = event.source.userId;
+  const id = getId(event);
 
-  /* ======================
+  /* =====================
      指令優先
-  ====================== */
+  ===================== */
 
   if (text === "/myid")
-    return reply(event, "你的UserID:\n" + userId);
+    return reply(event, userId);
 
-  if (text === "/groupid") {
-    if (!isGroupOrRoom(event))
-      return reply(event, "請在群組使用");
-    return reply(event, "ID:\n" + getId(event));
-  }
+  if (text === "/groupid")
+    return reply(event, id || "非群組");
 
-  /* ======================
+  /* =====================
      OWNER 管理
-  ====================== */
+  ===================== */
 
   if (userId === OWNER) {
 
-    if (text === "/addgroup") {
-      if (!isGroupOrRoom(event))
-        return reply(event, "請在群組使用");
-
-      const id = getId(event);
-      addGroup(id);
-      return reply(event, "✅ 已授權此群組");
-    }
-
-    if (text === "/removegroup") {
-      if (!isGroupOrRoom(event))
-        return reply(event, "請在群組使用");
-
-      const id = getId(event);
-      removeGroup(id);
-      return reply(event, "🗑 已移除授權");
-    }
-
-    if (text === "/groups") {
-      if (!allowedGroups.length)
-        return reply(event, "白名單為空");
+    if (text === "/pending") {
+      if (db.pending.length === 0)
+        return reply(event, "沒有待授權群組");
 
       return reply(event,
-        "白名單群組：\n\n" + allowedGroups.join("\n")
-      );
+        "待授權群組：\n\n" + db.pending.join("\n"));
     }
-  }
 
-  /* ======================
-     群組白名單限制
-  ====================== */
+    if (text === "/approve") {
+      if (!isGroup(event))
+        return reply(event, "請在群組使用");
 
-  if (isGroupOrRoom(event)) {
+      approve(id);
+      return reply(event, "✅ 群組已授權");
+    }
 
-    const id = getId(event);
+    if (text === "/reject") {
+      if (!isGroup(event))
+        return reply(event, "請在群組使用");
 
-    if (!isAllowed(id)) {
+      reject(id);
 
-      await reply(event, "❌ 此群組未授權");
+      await reply(event, "❌ 已拒絕並退出");
 
       if (event.source.type === "group")
         await client.leaveGroup(id);
@@ -235,15 +219,25 @@ async function handleEvent(event) {
     }
   }
 
-  /* ======================
+  /* =====================
+     未授權禁止使用
+  ===================== */
+
+  if (isGroup(event) && !isAllowed(id)) {
+    return reply(event, "⛔ 此群組尚未授權");
+  }
+
+  /* =====================
      翻譯
-  ====================== */
+  ===================== */
 
   const source = detectLang(text);
   const target = targetLang(source);
   const result = await translate(text, target);
 
-  return reply(event, `原文：${text}\n翻譯：${result}`);
+  return reply(event,
+`原文：${text}
+翻譯：${result}`);
 }
 
 /* =========================
@@ -252,5 +246,5 @@ async function handleEvent(event) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 BOT RUNNING ON " + PORT);
+  console.log("🚀 BOT RUNNING");
 });
