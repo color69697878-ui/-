@@ -1,81 +1,62 @@
-/* =====================================================
-   ENTERPRISE LINE TRANSLATION BOT
-   Features:
-   ✔ Command priority
-   ✔ /myid works
-   ✔ Auto leave unauthorized group/room
-   ✔ Owner bypass
-   ✔ Admin system
-   ✔ Authorization codes
-   ✔ Persistent whitelist (file storage)
-   ✔ Join gate message
-   ✔ Group + Room support
-   ✔ Safe translation (no command translation)
-   ✔ ESM compatible (Render ready)
-===================================================== */
-
 import express from "express";
 import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import fs from "fs";
-import path from "path";
 
 dotenv.config();
 
-/* =====================================================
-   BASIC SETUP
-===================================================== */
-
 const app = express();
+
+/* =========================
+   LINE
+========================= */
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 
 const client = new line.Client(config);
 
+/* =========================
+   OPENAI
+========================= */
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 });
+
+/* =========================
+   OWNER
+========================= */
 
 const OWNER = process.env.OWNER_USER_ID;
 
-/* =====================================================
-   DATA STORAGE (PERSISTENT)
-===================================================== */
+/* =========================
+   白名單永久儲存
+========================= */
 
-const dataDir = "./data";
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
+const DB_FILE = "./allowedGroups.json";
 
-const GROUP_FILE = path.join(dataDir, "groups.json");
-const ADMIN_FILE = path.join(dataDir, "admins.json");
-const CODE_FILE = path.join(dataDir, "codes.json");
-
-function load(file, def) {
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, JSON.stringify(def, null, 2));
-    return def;
-  }
-  return JSON.parse(fs.readFileSync(file));
+function loadGroups() {
+  if (!fs.existsSync(DB_FILE)) return [];
+  return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
-function save(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+function saveGroups(groups) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(groups, null, 2));
 }
 
-let allowedGroups = load(GROUP_FILE, []);
-let admins = load(ADMIN_FILE, []);
-let authCodes = load(CODE_FILE, []);
+let allowedGroups = loadGroups();
 
-/* =====================================================
-   LANGUAGE DETECT
-===================================================== */
+/* =========================
+   語言偵測
+========================= */
 
 function detectLang(text) {
-  if (/\p{Script=Thai}/u.test(text)) return "th";
-  if (/\p{Script=Han}/u.test(text)) return "zh";
+  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
+  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
   return "en";
 }
 
@@ -85,9 +66,9 @@ function targetLang(source) {
   return "繁體中文";
 }
 
-/* =====================================================
-   TRANSLATE
-===================================================== */
+/* =========================
+   翻譯
+========================= */
 
 async function translate(text, lang) {
   const r = await openai.chat.completions.create({
@@ -96,7 +77,7 @@ async function translate(text, lang) {
     messages: [
       {
         role: "system",
-        content: `你是專業翻譯引擎\n只輸出翻譯\n禁止解釋\n禁止補充`
+        content: `你是專業翻譯引擎，只輸出翻譯內容`
       },
       {
         role: "user",
@@ -108,170 +89,9 @@ async function translate(text, lang) {
   return r.choices[0].message.content.trim();
 }
 
-/* =====================================================
-   PERMISSION HELPERS
-===================================================== */
-
-function isOwner(id) {
-  return id === OWNER;
-}
-
-function isAdmin(id) {
-  return admins.includes(id) || isOwner(id);
-}
-
-function isGroupAllowed(id) {
-  return allowedGroups.includes(id);
-}
-
-/* =====================================================
-   WEBHOOK
-===================================================== */
-
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  await Promise.all(req.body.events.map(handleEvent));
-  res.sendStatus(200);
-});
-
-/* =====================================================
-   MAIN EVENT HANDLER
-===================================================== */
-
-async function handleEvent(event) {
-
-  const userId = event.source.userId;
-  const groupId = event.source.groupId;
-  const roomId = event.source.roomId;
-  const containerId = groupId || roomId;
-
-  /* ==========================================
-     JOIN EVENT (GATE)
-  ========================================== */
-
-  if (event.type === "join") {
-
-    if (!isGroupAllowed(containerId)) {
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "🔐 此群尚未授權\n請管理員輸入 /authcode 授權"
-      });
-    }
-    return;
-  }
-
-  /* ==========================================
-     ONLY HANDLE TEXT
-  ========================================== */
-
-  if (event.type !== "message") return;
-  if (event.message.type !== "text") return;
-
-  const text = event.message.text.trim();
-
-  /* ==========================================
-     COMMAND PRIORITY (ALWAYS FIRST)
-  ========================================== */
-
-  if (text === "/myid") {
-    return reply(event, `USER ID:\n${userId}`);
-  }
-
-  if (text === "/groupid") {
-    if (!containerId) return reply(event, "非群組");
-    return reply(event, `GROUP ID:\n${containerId}`);
-  }
-
-  /* ==========================================
-     GROUP AUTH CHECK (ALLOW OWNER / ADMIN)
-  ========================================== */
-
-  if (containerId && !isGroupAllowed(containerId) && !isAdmin(userId)) {
-
-    await reply(event, "❌ 此群組未授權");
-
-    if (groupId) await client.leaveGroup(containerId);
-    if (roomId) await client.leaveRoom(containerId);
-
-    return;
-  }
-
-  /* ==========================================
-     OWNER / ADMIN COMMANDS
-  ========================================== */
-
-  if (isAdmin(userId)) {
-
-    /* ---- generate auth code ---- */
-    if (text === "/gencode") {
-      const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-      authCodes.push(code);
-      save(CODE_FILE, authCodes);
-      return reply(event, `授權碼：${code}`);
-    }
-
-    /* ---- authorize group ---- */
-    if (text.startsWith("/authcode")) {
-
-      if (!containerId)
-        return reply(event, "請在群組使用");
-
-      const code = text.split(" ")[1];
-
-      if (!authCodes.includes(code))
-        return reply(event, "授權碼錯誤");
-
-      if (!allowedGroups.includes(containerId)) {
-        allowedGroups.push(containerId);
-        save(GROUP_FILE, allowedGroups);
-      }
-
-      authCodes = authCodes.filter(c => c !== code);
-      save(CODE_FILE, authCodes);
-
-      return reply(event, "✅ 群組已授權");
-    }
-
-    /* ---- revoke group ---- */
-    if (text === "/removegroup") {
-      allowedGroups = allowedGroups.filter(g => g !== containerId);
-      save(GROUP_FILE, allowedGroups);
-      return reply(event, "🗑 已移除授權");
-    }
-
-    /* ---- list groups ---- */
-    if (text === "/groups") {
-      return reply(event, `授權群組數量：${allowedGroups.length}`);
-    }
-
-    /* ---- add admin ---- */
-    if (text.startsWith("/addadmin") && isOwner(userId)) {
-      const id = text.split(" ")[1];
-      if (!admins.includes(id)) admins.push(id);
-      save(ADMIN_FILE, admins);
-      return reply(event, "已新增管理員");
-    }
-  }
-
-  /* ==========================================
-     IGNORE COMMAND TRANSLATION
-  ========================================== */
-
-  if (text.startsWith("/")) return;
-
-  /* ==========================================
-     TRANSLATION
-  ========================================== */
-
-  const source = detectLang(text);
-  const target = targetLang(source);
-  const result = await translate(text, target);
-
-  return reply(event, `原文：${text}\n翻譯：${result}`);
-}
-
-/* =====================================================
-   REPLY HELPER
-===================================================== */
+/* =========================
+   工具
+========================= */
 
 function reply(event, text) {
   return client.replyMessage(event.replyToken, {
@@ -280,11 +100,158 @@ function reply(event, text) {
   });
 }
 
-/* =====================================================
-   START SERVER
-===================================================== */
+function getGroupOrRoomId(event) {
+  return event.source.groupId || event.source.roomId;
+}
+
+function isGroupOrRoom(event) {
+  return event.source.type === "group" || event.source.type === "room";
+}
+
+function isAllowed(id) {
+  return allowedGroups.includes(id);
+}
+
+function addGroup(id) {
+  if (!allowedGroups.includes(id)) {
+    allowedGroups.push(id);
+    saveGroups(allowedGroups);
+  }
+}
+
+function removeGroup(id) {
+  allowedGroups = allowedGroups.filter(g => g !== id);
+  saveGroups(allowedGroups);
+}
+
+/* =========================
+   WEBHOOK
+========================= */
+
+app.post("/webhook", line.middleware(config), async (req, res) => {
+  await Promise.all(req.body.events.map(handleEvent));
+  res.sendStatus(200);
+});
+
+/* =========================
+   主事件
+========================= */
+
+async function handleEvent(event) {
+
+  /* ======================
+     BOT 被加入群組
+  ====================== */
+
+  if (event.type === "join") {
+
+    const id = getGroupOrRoomId(event);
+
+    if (!isAllowed(id)) {
+      await reply(event, "❌ 此群組未授權");
+
+      if (event.source.type === "group")
+        await client.leaveGroup(id);
+      else
+        await client.leaveRoom(id);
+    }
+    return;
+  }
+
+  /* ======================
+     非訊息忽略
+  ====================== */
+
+  if (event.type !== "message") return;
+  if (event.message.type !== "text") return;
+
+  const text = event.message.text.trim();
+  const userId = event.source.userId;
+
+  /* ======================
+     指令優先
+  ====================== */
+
+  if (text === "/myid")
+    return reply(event, "你的UserID:\n" + userId);
+
+  if (text === "/groupid") {
+    if (!isGroupOrRoom(event))
+      return reply(event, "請在群組使用");
+    return reply(event, "ID:\n" + getGroupOrRoomId(event));
+  }
+
+  /* ======================
+     OWNER 管理指令
+  ====================== */
+
+  if (userId === OWNER) {
+
+    if (text === "/addgroup") {
+      if (!isGroupOrRoom(event))
+        return reply(event, "請在群組使用");
+
+      const id = getGroupOrRoomId(event);
+      addGroup(id);
+      return reply(event, "✅ 已授權");
+    }
+
+    if (text === "/removegroup") {
+      if (!isGroupOrRoom(event))
+        return reply(event, "請在群組使用");
+
+      const id = getGroupOrRoomId(event);
+      removeGroup(id);
+      return reply(event, "🗑 已移除");
+    }
+
+    if (text === "/groups") {
+      if (allowedGroups.length === 0)
+        return reply(event, "白名單為空");
+
+      return reply(event,
+        "白名單數量：" + allowedGroups.length +
+        "\n\n" + allowedGroups.join("\n")
+      );
+    }
+  }
+
+  /* ======================
+     群組白名單限制
+  ====================== */
+
+  if (isGroupOrRoom(event)) {
+
+    const id = getGroupOrRoomId(event);
+
+    if (!isAllowed(id)) {
+      await reply(event, "❌ 此群組未授權");
+
+      if (event.source.type === "group")
+        await client.leaveGroup(id);
+      else
+        await client.leaveRoom(id);
+
+      return;
+    }
+  }
+
+  /* ======================
+     翻譯
+  ====================== */
+
+  const source = detectLang(text);
+  const target = targetLang(source);
+  const result = await translate(text, target);
+
+  return reply(event, `原文：${text}\n翻譯：${result}`);
+}
+
+/* =========================
+   啟動
+========================= */
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("ENTERPRISE BOT RUNNING ON " + PORT);
+  console.log("🚀 BOT RUNNING ON " + PORT);
 });
