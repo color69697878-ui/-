@@ -51,45 +51,6 @@ function saveGroups(groups) {
 let allowedGroups = loadGroups();
 
 /* =========================
-   語言偵測
-========================= */
-
-function detectLang(text) {
-  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
-  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
-  return "en";
-}
-
-function targetLang(source) {
-  if (source === "th") return "繁體中文";
-  if (source === "zh") return "泰文";
-  return "繁體中文";
-}
-
-/* =========================
-   翻譯
-========================= */
-
-async function translate(text, lang) {
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    messages: [
-      {
-        role: "system",
-        content: `你是專業翻譯引擎，只輸出翻譯內容`
-      },
-      {
-        role: "user",
-        content: `翻譯成${lang}：${text}`
-      }
-    ]
-  });
-
-  return r.choices[0].message.content.trim();
-}
-
-/* =========================
    工具
 ========================= */
 
@@ -100,7 +61,7 @@ function reply(event, text) {
   });
 }
 
-function getGroupOrRoomId(event) {
+function getId(event) {
   return event.source.groupId || event.source.roomId;
 }
 
@@ -125,6 +86,39 @@ function removeGroup(id) {
 }
 
 /* =========================
+   語言偵測
+========================= */
+
+function detectLang(text) {
+  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
+  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
+  return "en";
+}
+
+function targetLang(source) {
+  if (source === "th") return "繁體中文";
+  if (source === "zh") return "泰文";
+  return "繁體中文";
+}
+
+/* =========================
+   翻譯
+========================= */
+
+async function translate(text, lang) {
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    messages: [
+      { role: "system", content: "你是翻譯引擎，只輸出翻譯" },
+      { role: "user", content: `翻譯成${lang}：${text}` }
+    ]
+  });
+
+  return r.choices[0].message.content.trim();
+}
+
+/* =========================
    WEBHOOK
 ========================= */
 
@@ -145,26 +139,26 @@ async function handleEvent(event) {
 
   if (event.type === "join") {
 
-  const id = getGroupOrRoomId(event);
+    const id = getId(event);
 
-  if (!isAllowed(id)) {
+    if (!isAllowed(id)) {
 
-  // OWNER 可以授權
-  if (userId === OWNER && text === "/addgroup") {
-    addGroup(id);
-    return reply(event, "✅ 已授權此群組");
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "❌ 此群組未授權\n請群主輸入 /addgroup 授權"
+      });
+
+      if (event.source.type === "group")
+        await client.leaveGroup(id);
+      else
+        await client.leaveRoom(id);
+    }
+
+    return;
   }
 
-  return reply(event,
-    "❌ 此群組未授權\n" +
-    "請管理員輸入 /addgroup"
-  );
-}
-
-
-
   /* ======================
-     非訊息忽略
+     只處理文字訊息
   ====================== */
 
   if (event.type !== "message") return;
@@ -183,11 +177,11 @@ async function handleEvent(event) {
   if (text === "/groupid") {
     if (!isGroupOrRoom(event))
       return reply(event, "請在群組使用");
-    return reply(event, "ID:\n" + getGroupOrRoomId(event));
+    return reply(event, "ID:\n" + getId(event));
   }
 
   /* ======================
-     OWNER 管理指令
+     OWNER 管理
   ====================== */
 
   if (userId === OWNER) {
@@ -196,27 +190,26 @@ async function handleEvent(event) {
       if (!isGroupOrRoom(event))
         return reply(event, "請在群組使用");
 
-      const id = getGroupOrRoomId(event);
+      const id = getId(event);
       addGroup(id);
-      return reply(event, "✅ 已授權");
+      return reply(event, "✅ 已授權此群組");
     }
 
     if (text === "/removegroup") {
       if (!isGroupOrRoom(event))
         return reply(event, "請在群組使用");
 
-      const id = getGroupOrRoomId(event);
+      const id = getId(event);
       removeGroup(id);
-      return reply(event, "🗑 已移除");
+      return reply(event, "🗑 已移除授權");
     }
 
     if (text === "/groups") {
-      if (allowedGroups.length === 0)
+      if (!allowedGroups.length)
         return reply(event, "白名單為空");
 
       return reply(event,
-        "白名單數量：" + allowedGroups.length +
-        "\n\n" + allowedGroups.join("\n")
+        "白名單群組：\n\n" + allowedGroups.join("\n")
       );
     }
   }
@@ -227,9 +220,10 @@ async function handleEvent(event) {
 
   if (isGroupOrRoom(event)) {
 
-    const id = getGroupOrRoomId(event);
+    const id = getId(event);
 
     if (!isAllowed(id)) {
+
       await reply(event, "❌ 此群組未授權");
 
       if (event.source.type === "group")
@@ -260,5 +254,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON " + PORT);
 });
-
-
