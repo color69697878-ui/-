@@ -148,15 +148,19 @@ async function handleEvent(event) {
   const id = getGroupOrRoomId(event);
 
   if (!isAllowed(id)) {
-    await reply(event,
-      "⚠️ 此群組尚未授權\n\n" +
-      "請管理員輸入：\n" +
-      "/addgroup"
-    );
+
+  // OWNER 可以授權
+  if (userId === OWNER && text === "/addgroup") {
+    addGroup(id);
+    return reply(event, "✅ 已授權此群組");
   }
 
-  return;
+  return reply(event,
+    "❌ 此群組未授權\n" +
+    "請管理員輸入 /addgroup"
+  );
 }
+
 
 
   /* ======================
@@ -256,4 +260,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON " + PORT);
 });
+
 
