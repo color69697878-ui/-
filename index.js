@@ -373,10 +373,9 @@ async function translate(text, lang, style = "auto") {
 
   } catch (err) {
     console.error("❌ OPENAI ERROR:", err);
-    return "⚠️ 翻譯暫時不可用";
+    return "";
   }
 }
-
 /* =========================
    WEBHOOK
 ========================= */
@@ -563,4 +562,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON PORT", PORT);
 });
+
 
