@@ -197,6 +197,75 @@ function shouldIgnoreMessage(text) {
 }
 
 /* =========================
+   判斷是否像正常可翻譯句子
+========================= */
+
+function looksLikeTranslatableText(text) {
+  const t = text.trim();
+  if (!t) return false;
+
+  const hasChinese = /[\u4E00-\u9FFF]/.test(t);
+  const hasThai = /[\u0E00-\u0E7F]/.test(t);
+  const hasEnglish = /[a-zA-Z]/.test(t);
+  const hasDigits = /\d/.test(t);
+
+  // 純數字 / 純符號 / 純編號
+  if (/^[\d\s/._\-:+]+$/.test(t)) return false;
+
+  // 很短的英文+數字組合，像 In6 / A12 / B7
+  if (/^[a-zA-Z]{1,3}\d{1,4}$/i.test(t)) return false;
+
+  // 很短的代碼格式，像 in6-1 / a12/b / m3.5
+  if (/^[a-zA-Z0-9/_\-.:\s]{1,12}$/i.test(t) && hasDigits && !hasChinese && !hasThai) {
+    const words = t.match(/[a-zA-Z]+/g) || [];
+    if (words.length <= 1) return false;
+  }
+
+  // 中文或泰文通常可翻
+  if (hasChinese || hasThai) return true;
+
+  // 英文至少要像一句短語
+  if (hasEnglish) {
+    const words = t.match(/[a-zA-Z]+/g) || [];
+    if (words.length >= 2) return true;
+    return false;
+  }
+
+  return false;
+}
+
+/* =========================
+   數字 / 代碼前綴抽取
+========================= */
+
+function extractLeadingCode(text) {
+  const t = text.trim();
+
+  // 抓前綴代碼，例如：
+  // 2030/60/1/2700 客人上樓 黑色
+  // IN6 ลูกค้าขึ้นไปข้างบน
+  const match = t.match(/^([A-Za-z0-9][A-Za-z0-9/_\-.:]*)(\s+)(.+)$/);
+
+  if (!match) {
+    return { code: "", body: t };
+  }
+
+  const [, code, , body] = match;
+
+  // 單純英文單字不當代碼，例如 hello world
+  const looksLikeCode =
+    /\d/.test(code) ||
+    /[\/_.:-]/.test(code) ||
+    /^[A-Za-z]{1,3}\d{1,4}$/i.test(code);
+
+  if (!looksLikeCode) {
+    return { code: "", body: t };
+  }
+
+  return { code, body: body.trim() };
+}
+
+/* =========================
    語言判斷
 ========================= */
 
@@ -207,19 +276,9 @@ function detectLang(text) {
 }
 
 function targetLang(source) {
-
-  // 中文 → 泰文
-  if (source === "zh") {
-    return "泰文";
-  }
-
-  // 泰文 → 中文
-  if (source === "th") {
-    return "繁體中文";
-  }
-
-  // 英文或其他 → 中文 + 泰文
-  return "繁體中文與泰文";
+  if (source === "zh") return "泰文";
+  if (source === "th") return "繁體中文";
+  return "繁體中文和泰文";
 }
 
 /* =========================
@@ -259,46 +318,34 @@ function buildStyleInstructions(style) {
 22. 避免教科書語氣
 23. 避免過度正式
 24. 可省略不必要主詞，只要意思清楚自然
-25. 例如：
-   - 你在哪裡 → อยู่ไหน
-   - 你在幹嘛 → ทำอะไรอยู่
-   - 你吃飯了嗎 → กินข้าวยัง
-26. 中文翻泰文時，要優先追求「泰國人真的會這樣說」
 
 泰文 → 中文 特別要求：
-27. 不要保留泰文語序
-28. 必須先理解意思，再翻成自然中文
-29. 中文要像台灣人聊天，不要出現怪句
-30. 例如不要把「ออกไป」一律翻成「出來」
+25. 不要保留泰文語序
+26. 必須先理解意思，再翻成自然中文
+27. 中文要像台灣人聊天，不要出現怪句
 
 精準詞義規則：
-31. 泰文中的「ออก / ออกมา / ออกไป」不可固定翻法，
-    必須依上下文正確判斷是：
-    - 離開
-    - 出去
-    - 出來
-    - 到場
-    - 走了
-    - 去了
+28. 泰文中的「ออก / ออกมา / ออกไป」不可固定翻法，必須依上下文判斷是：
+    離開 / 出去 / 出來 / 到場 / 走了 / 去了
+29. 如果原意是離開、出去、走掉，就必須翻成：
+    離開 / 出去 / 走了
+    不可以錯翻成「出來」
+30. 如果原意是出現、到場、出來上班、出來見人，才可以翻成：
+    出來 / 到場 / 來了
+31. 「ไป / มา / กลับ / ส่ง / รับ」都必須依上下文判斷，不可固定單一翻法
+32. 優先保留真正語意，不要為了口語化改變方向性意思
 
-32. 如果原意是離開、出去、走掉，就必須翻成：
-    - 離開
-    - 出去
-    - 走了
-    不可以錯翻成「出來」。
-
-33. 如果原意是出現、到場、出來上班、出來見人，才可以翻成：
-    - 出來
-    - 到場
-    - 來了
-
-34. 「ไป / มา / กลับ / ส่ง / รับ」都必須依上下文判斷，不可固定單一翻法。
-35. 優先保留真正語意，不要為了口語化改變方向性意思。
+數字與代碼保留規則：
+33. 原文中的所有數字、編號、代碼、斜線格式、時間格式都必須完整保留
+34. 例如 2030/60/1/2700 必須原樣保留
+35. 不可刪除、不可改寫、不可省略
+36. 如果原文是「代碼 + 句子」，翻譯時要保留代碼，再翻譯後面的句子
+37. 不可以因為口語化而省略數字或代碼
 
 輸出格式規則：
-36. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
-37. 如果要求翻成「泰文」，只輸出泰文
-38. 如果要求翻成「繁體中文」，只輸出繁體中文
+38. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
+39. 如果要求翻成「泰文」，只輸出泰文
+40. 如果要求翻成「繁體中文」，只輸出繁體中文
 `;
 
   const styles = {
@@ -341,7 +388,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   v5 超自然泰文翻譯引擎
+   v5.2 安靜翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
@@ -368,6 +415,9 @@ async function translate(text, lang, style = "auto") {
     });
 
     const result = r.choices[0].message.content.trim();
+
+    if (!result) return "";
+
     setCachedTranslation(text, lang, style, result);
     return result;
 
@@ -376,6 +426,7 @@ async function translate(text, lang, style = "auto") {
     return "";
   }
 }
+
 /* =========================
    WEBHOOK
 ========================= */
@@ -510,7 +561,7 @@ async function handleEvent(event) {
       return reply(event, "⛔ 此群組尚未授權");
     }
 
-    /* 其他斜線指令不翻譯 */
+    /* 其他斜線指令不翻譯、不回應 */
 
     if (text.startsWith("/")) {
       return;
@@ -523,30 +574,47 @@ async function handleEvent(event) {
       return;
     }
 
-    /* v5 智慧翻譯 */
+    /* 不像正常句子就安靜 */
 
-    const source = detectLang(text);
-const target = targetLang(source);
-const style = isGroupOrRoom(event) ? getStyle(id) : "auto";
+    if (!looksLikeTranslatableText(text)) {
+      console.log("🙈 看起來不像正常句子，略過:", text);
+      return;
+    }
 
-const result = await translate(text, target, style);
+    /* 抽取前綴代碼 */
 
-if (!result || !result.trim()) {
-  console.log("🙈 無翻譯結果，略過回覆:", text);
-  return;
-}
+    const { code, body } = extractLeadingCode(text);
 
-return reply(event, result);
+    if (!body || !looksLikeTranslatableText(body)) {
+      console.log("🙈 代碼後沒有可翻譯句子，略過:", text);
+      return;
+    }
+
+    /* 智慧翻譯 */
+
+    const source = detectLang(body);
+    const target = targetLang(source);
+    const style = isGroupOrRoom(event) ? getStyle(id) : "auto";
+
+    const translatedBody = await translate(body, target, style);
+
+    if (!translatedBody || !translatedBody.trim()) {
+      console.log("🙈 無翻譯結果，略過回覆:", text);
+      return;
+    }
+
+    const finalResult = code
+      ? translatedBody
+          .split("\n")
+          .map(line => `${code} ${line.trim()}`)
+          .join("\n")
+      : translatedBody;
+
+    return reply(event, finalResult);
 
   } catch (err) {
     console.error("❌ HANDLE EVENT ERROR:", err);
-
-    if (event.replyToken) {
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: "⚠️ 系統暫時異常"
-      });
-    }
+    return;
   }
 }
 
@@ -567,6 +635,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON PORT", PORT);
 });
-
-
-
