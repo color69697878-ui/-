@@ -74,6 +74,12 @@ let groupDB = loadJSON(GROUP_DB_FILE, {
   styles: {}
 });
 
+if (!Array.isArray(groupDB.allowed)) groupDB.allowed = [];
+if (!Array.isArray(groupDB.pending)) groupDB.pending = [];
+if (!groupDB.styles || typeof groupDB.styles !== "object") groupDB.styles = {};
+
+saveJSON(GROUP_DB_FILE, groupDB);
+
 function isAllowed(id) {
   return groupDB.allowed.includes(id);
 }
@@ -89,12 +95,15 @@ function addPending(id) {
 function approveGroup(id) {
   if (!id) return;
   groupDB.pending = groupDB.pending.filter(x => x !== id);
+
   if (!groupDB.allowed.includes(id)) {
     groupDB.allowed.push(id);
   }
+
   if (!groupDB.styles[id]) {
     groupDB.styles[id] = "auto";
   }
+
   saveJSON(GROUP_DB_FILE, groupDB);
 }
 
@@ -192,16 +201,15 @@ function shouldIgnoreMessage(text) {
 ========================= */
 
 function detectLang(text) {
-  if (/[\u0E00-\u0E7F]/.test(text)) return "th"; // 泰文
-  if (/[\u4E00-\u9FFF]/.test(text)) return "zh"; // 中文
-  return "en"; // 其他視為英文
+  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
+  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
+  return "en";
 }
 
 function targetLang(source) {
-  if (source === "zh") return "英文和泰文";
-  if (source === "en") return "繁體中文和泰文";
-  if (source === "th") return "繁體中文和英文";
-  return "繁體中文";
+  if (source === "zh") return "泰文";
+  if (source === "th") return "繁體中文";
+  return "繁體中文和泰文";
 }
 
 /* =========================
@@ -210,46 +218,87 @@ function targetLang(source) {
 
 function buildStyleInstructions(style) {
   const common = `
-你是頂級中英泰聊天翻譯專家，特別擅長泰文翻成自然中文，也擅長中文翻成自然泰文。
+你是頂級中英泰聊天翻譯專家，尤其擅長把中文翻成超自然泰文，以及把泰文翻成超自然中文。
 
-翻譯硬規則：
+硬規則：
 1. 只輸出翻譯結果
 2. 不要解釋
 3. 不要加原文
 4. 不要加前言或結尾
-5. 可以重組語序
-6. 不要逐字直譯
-7. 保留原本意思與情緒
-8. 中文要像台灣人真的會說的話
-9. 泰文要像泰國人真的會說的話
-10. 英文要自然簡單，不要教科書感
-11. 如果輸出兩種語言，請分成兩行，一行一種語言
-12. 不要自稱 AI，不要提知識截止時間，不要回答翻譯以外內容
+5. 不要混用語言
+6. 每一行只能是一種語言
+7. 中文只能用中文
+8. 泰文只能用泰文
+9. 英文只能用英文
+10. 如果要輸出兩種語言，請一行一種語言
+11. 嚴禁在泰文句子中混入中文
+12. 嚴禁在中文句子中混入泰文
 
-泰文翻中文特別要求：
-13. 不要照泰文語序硬翻成怪中文
-14. 必須先理解意思，再改寫成自然中文
-15. 避免出現奇怪句型，例如：
-「我點了餐，不知道他要把我送去哪裡」
-應優化成：
-「我點了外送，但不知道會送到哪」
+翻譯原則：
+13. 不要逐字直譯
+14. 要根據上下文重組語序
+15. 要像母語者自然聊天
+16. 保留原本情緒與語氣
+17. 中文優先用台灣日常聊天說法
+18. 泰文優先用泰國人日常聊天說法
+19. 英文優先用自然簡單口語
 
-中文翻泰文特別要求：
-16. 泰文優先使用自然聊天語氣
-17. 避免過於正式、教科書、逐字翻譯
-18. 簡短自然比冗長正式更好
+中文 → 泰文 特別要求：
+20. 必須像泰國人จริงๆ在 LINE 聊天
+21. 優先使用自然短句
+22. 避免教科書語氣
+23. 避免過度正式
+24. 可省略不必要主詞，只要意思清楚自然
+25. 例如：
+   - 你在哪裡 → อยู่ไหน
+   - 你在幹嘛 → ทำอะไรอยู่
+   - 你吃飯了嗎 → กินข้าวยัง
+26. 中文翻泰文時，要優先追求「泰國人真的會這樣說」
+
+泰文 → 中文 特別要求：
+27. 不要保留泰文語序
+28. 必須先理解意思，再翻成自然中文
+29. 中文要像台灣人聊天，不要出現怪句
+30. 例如不要把「ออกไป」一律翻成「出來」
+
+精準詞義規則：
+31. 泰文中的「ออก / ออกมา / ออกไป」不可固定翻法，
+    必須依上下文正確判斷是：
+    - 離開
+    - 出去
+    - 出來
+    - 到場
+    - 走了
+    - 去了
+
+32. 如果原意是離開、出去、走掉，就必須翻成：
+    - 離開
+    - 出去
+    - 走了
+    不可以錯翻成「出來」。
+
+33. 如果原意是出現、到場、出來上班、出來見人，才可以翻成：
+    - 出來
+    - 到場
+    - 來了
+
+34. 「ไป / มา / กลับ / ส่ง / รับ」都必須依上下文判斷，不可固定單一翻法。
+35. 優先保留真正語意，不要為了口語化改變方向性意思。
+
+輸出格式規則：
+36. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
+37. 如果要求翻成「泰文」，只輸出泰文
+38. 如果要求翻成「繁體中文」，只輸出繁體中文
 `;
 
   const styles = {
     auto: `
 風格模式：自動
 請根據內容自動判斷要用哪種語氣：
-- 日常聊天 → 口語
-- 感情聊天 → 柔和、自然
-- 夜生活 / 陪酒 / 酒吧 → 自然、懂行內語氣
-- 工作內容 → 清楚、自然、略正式
-- 女生聊天 → 柔和、自然
-- 男生聊天 → 直接、自然
+- 日常聊天 → 口語自然
+- 感情聊天 → 柔和自然
+- 夜生活 → 懂場景但不浮誇
+- 工作內容 → 清楚自然略正式
 `,
     casual: `
 風格模式：日常聊天
@@ -257,28 +306,24 @@ function buildStyleInstructions(style) {
 `,
     romance: `
 風格模式：感情聊天
-請保留曖昧、撒嬌、委屈、生氣、在意、冷淡等情緒。
-語氣要像情侶或曖昧對象聊天，自然但不要肉麻過頭。
+請保留曖昧、撒嬌、委屈、生氣、冷淡等情緒。
 `,
     nightlife: `
 風格模式：夜生活
-請使用夜生活、酒吧、陪酒、交際場合常見的自然聊天語氣。
-泰文要像真的在夜生活圈聊天，不要太正式。
-中文也要自然好懂，不要生硬。
+請使用夜生活、酒吧、陪酒、交際場合常見的自然聊天語氣，
+但不能因場景而亂改方向詞意思。
 `,
     work: `
 風格模式：工作正式
-請清楚、禮貌、自然，不要過度書面，但也不要太隨便。
-適合工作對話、安排時間、交代事情、客服、商務往來。
+請清楚、禮貌、自然，不要太隨便，也不要過度書面。
 `,
     feminine: `
 風格模式：女生聊天
-語氣柔和、自然、帶一點女生日常聊天感。
-但不要刻意裝可愛，也不要過頭。
+語氣柔和、自然、日常，不要太做作。
 `,
     masculine: `
 風格模式：男生聊天
-語氣自然、直接、口語，不要太彆扭，不要太正式。
+語氣自然、直接、口語，不要太彆扭。
 `
   };
 
@@ -286,7 +331,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   翻譯 v4
+   v5 超自然泰文翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
@@ -307,7 +352,7 @@ async function translate(text, lang, style = "auto") {
         },
         {
           role: "user",
-          content: `請把下面這句翻譯成${lang}，用自然聊天口語：${text}`
+          content: `請把下面這句翻譯成${lang}，用超自然聊天口語：${text}`
         }
       ]
     });
@@ -344,9 +389,6 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
 async function handleEvent(event) {
   try {
-    /* ======================
-       BOT 被加入群組 / 聊天室
-    ====================== */
     if (event.type === "join") {
       const id = getId(event);
 
@@ -366,9 +408,6 @@ async function handleEvent(event) {
       return reply(event, "✅ 此群組已授權");
     }
 
-    /* ======================
-       非文字訊息忽略
-    ====================== */
     if (event.type !== "message") return;
     if (event.message.type !== "text") return;
 
@@ -378,9 +417,7 @@ async function handleEvent(event) {
 
     console.log("📨 message:", text);
 
-    /* ======================
-       指令優先
-    ====================== */
+    /* 指令優先 */
 
     if (text === "/myid") {
       return reply(event, userId || "查不到 userId");
@@ -397,9 +434,7 @@ async function handleEvent(event) {
       return reply(event, `目前翻譯風格：${getStyle(id)}`);
     }
 
-    /* ======================
-       OWNER 管理指令
-    ====================== */
+    /* OWNER 管理指令 */
 
     if (userId === OWNER) {
       if (text === "/pending") {
@@ -460,34 +495,26 @@ async function handleEvent(event) {
       }
     }
 
-    /* ======================
-       未授權群組限制
-    ====================== */
+    /* 未授權群組限制 */
 
     if (isGroupOrRoom(event) && !isAllowed(id)) {
       return reply(event, "⛔ 此群組尚未授權");
     }
 
-    /* ======================
-       其他斜線指令不翻譯
-    ====================== */
+    /* 其他斜線指令不翻譯 */
 
     if (text.startsWith("/")) {
       return;
     }
 
-    /* ======================
-       智慧聊天過濾器
-    ====================== */
+    /* 智慧聊天過濾器 */
 
     if (shouldIgnoreMessage(text)) {
       console.log("🙈 忽略無意義訊息:", text);
       return;
     }
 
-    /* ======================
-       v4 終極翻譯
-    ====================== */
+    /* v5 智慧翻譯 */
 
     const source = detectLang(text);
     const target = targetLang(source);
