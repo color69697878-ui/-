@@ -173,25 +173,25 @@ function shouldIgnoreMessage(text) {
   const t = text.trim();
   if (!t) return true;
 
+  // 純符號 / 純表情 / 純標點
   const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(t);
   if (!hasLettersOrNumbers) return true;
 
   const lower = t.toLowerCase();
 
+  // 明確忽略的垃圾短訊息
   const ignoreList = new Set([
     "ok", "okay", "k", "kk", "okok",
-    "yes", "yeah", "yep", "no", "nope",
     "lol", "lmao", "haha", "hah", "555", "5555",
     "hmm", "um", "umm", "uh", "uhh",
     "hi", "hello", "yo",
-    "恩", "嗯", "喔", "哦", "好", "嗯嗯", "哈哈", "呵呵",
-    "好喔", "好哦", "恩恩", "收到",
-    "โอเค", "อืม", "อือ", "อ่า", "เออ", "ใช่", "จ้า", "ครับ", "ค่ะ"
+    "恩", "嗯", "喔", "哦", "嗯嗯", "哈哈", "呵呵",
+    "好喔", "好哦", "恩恩",
+    "โอเค", "อืม", "อือ", "อ่า", "เออ", "จ้า", "ครับ", "ค่ะ"
   ]);
 
   if (ignoreList.has(lower)) return true;
   if (ignoreList.has(t)) return true;
-  if (t.length <= 1) return true;
 
   return false;
 }
@@ -209,26 +209,23 @@ function looksLikeTranslatableText(text) {
   const hasEnglish = /[a-zA-Z]/.test(t);
   const hasDigits = /\d/.test(t);
 
-  // 純數字 / 純符號 / 純編號
+  // 純數字 / 純編號
   if (/^[\d\s/._\-:+]+$/.test(t)) return false;
 
-  // 很短的英文+數字組合，像 In6 / A12 / B7
+  // 像 In6 / A12 / B7 這種短代碼
   if (/^[a-zA-Z]{1,3}\d{1,4}$/i.test(t)) return false;
 
-  // 很短的代碼格式，像 in6-1 / a12/b / m3.5
-  if (/^[a-zA-Z0-9/_\-.:\s]{1,12}$/i.test(t) && hasDigits && !hasChinese && !hasThai) {
-    const words = t.match(/[a-zA-Z]+/g) || [];
-    if (words.length <= 1) return false;
-  }
+  // 中文可翻
+  if (hasChinese) return true;
 
-  // 中文或泰文通常可翻
-  if (hasChinese || hasThai) return true;
+  // 泰文可翻，像 ใช่ / ไป / มา
+  if (hasThai) return true;
 
-  // 英文至少要像一句短語
+  // 英文可翻，像 black / yes / up
   if (hasEnglish) {
-    const words = t.match(/[a-zA-Z]+/g) || [];
-    if (words.length >= 2) return true;
-    return false;
+    // 有數字又很短，像 m3 / in6 / a12，不翻
+    if (hasDigits && t.length <= 12) return false;
+    return true;
   }
 
   return false;
@@ -241,9 +238,6 @@ function looksLikeTranslatableText(text) {
 function extractLeadingCode(text) {
   const t = text.trim();
 
-  // 抓前綴代碼，例如：
-  // 2030/60/1/2700 客人上樓 黑色
-  // IN6 ลูกค้าขึ้นไปข้างบน
   const match = t.match(/^([A-Za-z0-9][A-Za-z0-9/_\-.:]*)(\s+)(.+)$/);
 
   if (!match) {
@@ -252,7 +246,6 @@ function extractLeadingCode(text) {
 
   const [, code, , body] = match;
 
-  // 單純英文單字不當代碼，例如 hello world
   const looksLikeCode =
     /\d/.test(code) ||
     /[\/_.:-]/.test(code) ||
@@ -388,7 +381,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   v5.2 安靜翻譯引擎
+   v5.2.1 翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
