@@ -77,10 +77,6 @@ function isAllowed(id) {
   return groupDB.allowed.includes(id);
 }
 
-function isPending(id) {
-  return groupDB.pending.includes(id);
-}
-
 function addPending(id) {
   if (!id) return;
   if (!groupDB.pending.includes(id)) {
@@ -145,8 +141,7 @@ function isGroupOrRoom(event) {
 }
 
 /* =========================
-   忽略無意義訊息
-   例如：?, ??, !, ..., 😂, ❤️, ？？？
+   智慧聊天過濾器
 ========================= */
 
 function shouldIgnoreMessage(text) {
@@ -154,11 +149,31 @@ function shouldIgnoreMessage(text) {
 
   if (!t) return true;
 
-  // 只要有任何「文字或數字」就不忽略
-  const hasMeaningfulChars = /[\p{L}\p{N}]/u.test(t);
+  // 只有符號 / 標點 / emoji
+  const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(t);
+  if (!hasLettersOrNumbers) return true;
 
-  // 沒有文字數字，代表只有符號 / 表情 / 標點
-  return !hasMeaningfulChars;
+  // 常見無意義短回覆
+  const lower = t.toLowerCase();
+
+  const ignoreList = new Set([
+    "ok", "okay", "k", "kk", "okok",
+    "yes", "yeah", "yep", "no", "nope",
+    "lol", "lmao", "haha", "hah", "555", "5555",
+    "hmm", "um", "umm", "uh", "uhh",
+    "hi", "hello", "yo",
+    "恩", "嗯", "喔", "哦", "好", "嗯嗯", "哈哈", "呵呵",
+    "好喔", "好哦", "恩恩", "收到",
+    "โอเค", "อืม", "อือ", "อ่า", "เออ", "ใช่", "จ้า", "ครับ", "ค่ะ"
+  ]);
+
+  if (ignoreList.has(lower)) return true;
+  if (ignoreList.has(t)) return true;
+
+  // 單個字或極短且沒什麼資訊
+  if (t.length <= 1) return true;
+
+  return false;
 }
 
 /* =========================
@@ -179,7 +194,7 @@ function targetLang(source) {
 }
 
 /* =========================
-   翻譯（口語強化 + 快取）
+   聊天模式翻譯
 ========================= */
 
 async function translate(text, lang) {
@@ -192,43 +207,43 @@ async function translate(text, lang) {
   try {
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.3,
+      temperature: 0.4,
       messages: [
         {
           role: "system",
           content: `
-你是頂級中英泰翻譯員，專門翻譯 LINE / Messenger / 日常聊天內容。
+你是中英泰聊天翻譯員。
 
 翻譯規則：
 1. 只輸出翻譯結果
 2. 不要解釋
-3. 不要加原文
-4. 不要加前言或結尾
-5. 優先使用母語人士日常會說的自然口語
-6. 不要過度書面化
-7. 不要逐字直譯，要保留原意並讓對方容易懂
-8. 如果翻成泰文，請優先使用泰國人聊天常用說法
-9. 如果原文語氣很強烈、生氣、撒嬌、冷淡，要保留那個語氣
-10. 若有模糊空間，優先選擇自然、好懂、像真人的翻法
-11. 如果要輸出兩種語言，請分成兩行，一行一種語言
-12. 不要自稱 AI，不要提知識截止時間，不要回答翻譯以外的內容
+3. 不要顯示原文
+4. 使用 LINE / Messenger 聊天語氣
+5. 優先使用口語
+6. 不要書面語
+7. 可以簡短
+8. 保留原本情緒
+9. 泰文要像泰國人聊天
+10. 中文要像平常聊天
+11. 英文要自然，不要太教科書
+12. 如果輸出兩種語言，請分成兩行
+13. 不要回答問題，不要自稱 AI，不要提知識截止時間
 `
         },
         {
           role: "user",
-          content: `請把下面這句翻譯成${lang}，用自然口語：${text}`
+          content: `翻譯成${lang}：${text}`
         }
       ]
     });
 
     const result = r.choices[0].message.content.trim();
-
     setCachedTranslation(text, lang, result);
-
     return result;
+
   } catch (err) {
     console.error("❌ OPENAI ERROR:", err);
-    return "⚠️ 翻譯服務暫時異常";
+    return "⚠️ 翻譯暫時不可用";
   }
 }
 
@@ -287,14 +302,6 @@ async function handleEvent(event) {
     const id = getId(event);
 
     console.log("📨 message:", text);
-
-    /* ======================
-       先忽略純符號 / 表情 / 問號
-    ====================== */
-    if (shouldIgnoreMessage(text)) {
-      console.log("🙈 忽略無意義訊息:", text);
-      return;
-    }
 
     /* ======================
        指令優先
@@ -369,7 +376,16 @@ async function handleEvent(event) {
     }
 
     /* ======================
-       三向口語翻譯
+       智慧聊天過濾器
+    ====================== */
+
+    if (shouldIgnoreMessage(text)) {
+      console.log("🙈 忽略無意義訊息:", text);
+      return;
+    }
+
+    /* ======================
+       聊天模式三向翻譯
     ====================== */
 
     const source = detectLang(text);
