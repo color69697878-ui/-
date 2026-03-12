@@ -526,12 +526,17 @@ async function handleEvent(event) {
     /* v5 智慧翻譯 */
 
     const source = detectLang(text);
-    const target = targetLang(source);
-    const style = isGroupOrRoom(event) ? getStyle(id) : "auto";
+const target = targetLang(source);
+const style = isGroupOrRoom(event) ? getStyle(id) : "auto";
 
-    const result = await translate(text, target, style);
+const result = await translate(text, target, style);
 
-    return reply(event, result);
+if (!result || !result.trim()) {
+  console.log("🙈 無翻譯結果，略過回覆:", text);
+  return;
+}
+
+return reply(event, result);
 
   } catch (err) {
     console.error("❌ HANDLE EVENT ERROR:", err);
@@ -562,5 +567,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON PORT", PORT);
 });
+
 
 
