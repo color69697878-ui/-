@@ -207,9 +207,19 @@ function detectLang(text) {
 }
 
 function targetLang(source) {
-  if (source === "zh") return "泰文";
-  if (source === "th") return "繁體中文";
-  return "繁體中文和泰文";
+
+  // 中文 → 泰文
+  if (source === "zh") {
+    return "泰文";
+  }
+
+  // 泰文 → 中文
+  if (source === "th") {
+    return "繁體中文";
+  }
+
+  // 英文或其他 → 中文 + 泰文
+  return "繁體中文與泰文";
 }
 
 /* =========================
@@ -553,3 +563,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON PORT", PORT);
 });
+
