@@ -36,29 +36,94 @@ const openai = new OpenAI({
 const OWNER = process.env.OWNER_USER_ID;
 
 /* =========================
-   資料庫
+   資料庫檔案
 ========================= */
 
-const DB_FILE = "./groups.json";
+const GROUP_DB_FILE = "./groups.json";
+const CACHE_DB_FILE = "./cache.json";
 
-function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    return { allowed: [], pending: [] };
+/* =========================
+   讀寫工具
+========================= */
+
+function loadJSON(file, fallback) {
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, JSON.stringify(fallback, null, 2), "utf8");
+    return fallback;
   }
 
   try {
-    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (err) {
-    console.error("❌ groups.json 讀取失敗，已改用空白資料:", err);
-    return { allowed: [], pending: [] };
+    console.error(`❌ ${file} 讀取失敗，改用預設值:`, err);
+    return fallback;
   }
 }
 
-function saveDB() {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
+function saveJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
 }
 
-let db = loadDB();
+/* =========================
+   群組授權資料
+========================= */
+
+let groupDB = loadJSON(GROUP_DB_FILE, {
+  allowed: [],
+  pending: []
+});
+
+function isAllowed(id) {
+  return groupDB.allowed.includes(id);
+}
+
+function isPending(id) {
+  return groupDB.pending.includes(id);
+}
+
+function addPending(id) {
+  if (!id) return;
+  if (!groupDB.pending.includes(id)) {
+    groupDB.pending.push(id);
+    saveJSON(GROUP_DB_FILE, groupDB);
+  }
+}
+
+function approveGroup(id) {
+  if (!id) return;
+  groupDB.pending = groupDB.pending.filter(x => x !== id);
+  if (!groupDB.allowed.includes(id)) {
+    groupDB.allowed.push(id);
+  }
+  saveJSON(GROUP_DB_FILE, groupDB);
+}
+
+function rejectGroup(id) {
+  if (!id) return;
+  groupDB.pending = groupDB.pending.filter(x => x !== id);
+  saveJSON(GROUP_DB_FILE, groupDB);
+}
+
+/* =========================
+   翻譯快取資料
+========================= */
+
+let cacheDB = loadJSON(CACHE_DB_FILE, {});
+
+function getCacheKey(text, lang) {
+  return `${lang}|||${text}`;
+}
+
+function getCachedTranslation(text, lang) {
+  const key = getCacheKey(text, lang);
+  return cacheDB[key] || null;
+}
+
+function setCachedTranslation(text, lang, result) {
+  const key = getCacheKey(text, lang);
+  cacheDB[key] = result;
+  saveJSON(CACHE_DB_FILE, cacheDB);
+}
 
 /* =========================
    工具
@@ -67,7 +132,7 @@ let db = loadDB();
 function reply(event, text) {
   return client.replyMessage(event.replyToken, {
     type: "text",
-    text,
+    text
   });
 }
 
@@ -79,35 +144,21 @@ function isGroupOrRoom(event) {
   return event.source.type === "group" || event.source.type === "room";
 }
 
-function isAllowed(id) {
-  return db.allowed.includes(id);
-}
+/* =========================
+   忽略無意義訊息
+   例如：?, ??, !, ..., 😂, ❤️, ？？？
+========================= */
 
-function isPending(id) {
-  return db.pending.includes(id);
-}
+function shouldIgnoreMessage(text) {
+  const t = text.trim();
 
-function addPending(id) {
-  if (!id) return;
-  if (!isPending(id)) {
-    db.pending.push(id);
-    saveDB();
-  }
-}
+  if (!t) return true;
 
-function approveGroup(id) {
-  if (!id) return;
-  db.pending = db.pending.filter((x) => x !== id);
-  if (!db.allowed.includes(id)) {
-    db.allowed.push(id);
-  }
-  saveDB();
-}
+  // 只要有任何「文字或數字」就不忽略
+  const hasMeaningfulChars = /[\p{L}\p{N}]/u.test(t);
 
-function rejectGroup(id) {
-  if (!id) return;
-  db.pending = db.pending.filter((x) => x !== id);
-  saveDB();
+  // 沒有文字數字，代表只有符號 / 表情 / 標點
+  return !hasMeaningfulChars;
 }
 
 /* =========================
@@ -128,10 +179,16 @@ function targetLang(source) {
 }
 
 /* =========================
-   翻譯（口語強化版）
+   翻譯（口語強化 + 快取）
 ========================= */
 
 async function translate(text, lang) {
+  const cached = getCachedTranslation(text, lang);
+  if (cached) {
+    console.log("⚡ 使用快取翻譯:", text);
+    return cached;
+  }
+
   try {
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -164,7 +221,11 @@ async function translate(text, lang) {
       ]
     });
 
-    return r.choices[0].message.content.trim();
+    const result = r.choices[0].message.content.trim();
+
+    setCachedTranslation(text, lang, result);
+
+    return result;
   } catch (err) {
     console.error("❌ OPENAI ERROR:", err);
     return "⚠️ 翻譯服務暫時異常";
@@ -194,7 +255,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 async function handleEvent(event) {
   try {
     /* ======================
-       BOT 被加入群組 / 房間
+       BOT 被加入群組 / 聊天室
     ====================== */
     if (event.type === "join") {
       const id = getId(event);
@@ -228,6 +289,14 @@ async function handleEvent(event) {
     console.log("📨 message:", text);
 
     /* ======================
+       先忽略純符號 / 表情 / 問號
+    ====================== */
+    if (shouldIgnoreMessage(text)) {
+      console.log("🙈 忽略無意義訊息:", text);
+      return;
+    }
+
+    /* ======================
        指令優先
     ====================== */
 
@@ -245,13 +314,13 @@ async function handleEvent(event) {
 
     if (userId === OWNER) {
       if (text === "/pending") {
-        if (db.pending.length === 0) {
+        if (groupDB.pending.length === 0) {
           return reply(event, "沒有待授權群組");
         }
 
         return reply(
           event,
-          "待授權群組：\n\n" + db.pending.join("\n")
+          "待授權群組：\n\n" + groupDB.pending.join("\n")
         );
       }
 
@@ -292,7 +361,7 @@ async function handleEvent(event) {
     }
 
     /* ======================
-       不翻譯其他斜線指令
+       其他斜線指令不翻譯
     ====================== */
 
     if (text.startsWith("/")) {
@@ -300,7 +369,7 @@ async function handleEvent(event) {
     }
 
     /* ======================
-       三向翻譯
+       三向口語翻譯
     ====================== */
 
     const source = detectLang(text);
@@ -322,7 +391,7 @@ async function handleEvent(event) {
 }
 
 /* =========================
-   Render 健康檢查
+   健康檢查
 ========================= */
 
 app.get("/", (req, res) => {
