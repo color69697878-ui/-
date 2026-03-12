@@ -150,19 +150,68 @@ function setCachedTranslation(text, lang, style, result) {
    工具
 ========================= */
 
-function reply(event, text) {
-  return client.replyMessage(event.replyToken, {
-    type: "text",
-    text
-  });
-}
-
 function getId(event) {
   return event.source.groupId || event.source.roomId || null;
 }
 
 function isGroupOrRoom(event) {
   return event.source.type === "group" || event.source.type === "room";
+}
+
+function buildSender(profile) {
+  if (!profile || !profile.displayName) return undefined;
+
+  const sender = {
+    name: profile.displayName
+  };
+
+  if (profile.pictureUrl) {
+    sender.iconUrl = profile.pictureUrl;
+  }
+
+  return sender;
+}
+
+async function reply(event, text, senderProfile = null) {
+  const message = {
+    type: "text",
+    text
+  };
+
+  const sender = buildSender(senderProfile);
+  if (sender) {
+    message.sender = sender;
+  }
+
+  return client.replyMessage(event.replyToken, message);
+}
+
+/* =========================
+   取得發言者資料
+========================= */
+
+async function getSenderProfile(event) {
+  try {
+    const userId = event.source.userId;
+    if (!userId) return null;
+
+    if (event.source.type === "user") {
+      return await client.getProfile(userId);
+    }
+
+    if (event.source.type === "group") {
+      return await client.getGroupMemberProfile(event.source.groupId, userId);
+    }
+
+    if (event.source.type === "room") {
+      return await client.getRoomMemberProfile(event.source.roomId, userId);
+    }
+
+    return null;
+  } catch (err) {
+    console.error("⚠️ 取得 sender profile 失敗:", err?.message || err);
+    return null;
+  }
 }
 
 /* =========================
@@ -173,13 +222,11 @@ function shouldIgnoreMessage(text) {
   const t = text.trim();
   if (!t) return true;
 
-  // 純符號 / 純表情 / 純標點
   const hasLettersOrNumbers = /[\p{L}\p{N}]/u.test(t);
   if (!hasLettersOrNumbers) return true;
 
   const lower = t.toLowerCase();
 
-  // 明確忽略的垃圾短訊息
   const ignoreList = new Set([
     "ok", "okay", "k", "kk", "okok",
     "lol", "lmao", "haha", "hah", "555", "5555",
@@ -209,21 +256,13 @@ function looksLikeTranslatableText(text) {
   const hasEnglish = /[a-zA-Z]/.test(t);
   const hasDigits = /\d/.test(t);
 
-  // 純數字 / 純編號
   if (/^[\d\s/._\-:+]+$/.test(t)) return false;
-
-  // 像 In6 / A12 / B7 這種短代碼
   if (/^[a-zA-Z]{1,3}\d{1,4}$/i.test(t)) return false;
 
-  // 中文可翻
   if (hasChinese) return true;
-
-  // 泰文可翻，像 ใช่ / ไป / มา
   if (hasThai) return true;
 
-  // 英文可翻，像 black / yes / up
   if (hasEnglish) {
-    // 有數字又很短，像 m3 / in6 / a12，不翻
     if (hasDigits && t.length <= 12) return false;
     return true;
   }
@@ -280,7 +319,7 @@ function targetLang(source) {
 
 function buildStyleInstructions(style) {
   const common = `
-你是頂級中英泰聊天翻譯專家，尤其擅長把中文翻成超自然泰文，以及把泰文翻成超自然中文。
+你是頂級中英泰聊天翻譯專家，尤其擅長把中文翻成超自然泰文，以及把泰文翻成超自然中文。你也擅長修正聊天中的拼字錯誤、漏字、簡寫、口語寫法，再進行翻譯。
 
 硬規則：
 1. 只輸出翻譯結果
@@ -305,40 +344,47 @@ function buildStyleInstructions(style) {
 18. 泰文優先用泰國人日常聊天說法
 19. 英文優先用自然簡單口語
 
+拼字修正與語意理解規則：
+20. 如果原文有明顯錯字、漏字、簡寫、打錯字、聊天式亂打，先自動理解最可能的原意，再翻譯。
+21. 不要把明顯錯字照抄進翻譯。
+22. 例如泰文像「ฉันย่านร้าน」這種不自然寫法，要先推測可能原意，例如「ฉันอยู่ร้าน」，再翻譯。
+23. 如果英文有小拼字錯誤，例如 customer / custumer / costumer，要根據上下文理解後再翻譯。
+24. 中文若有少字、錯字，也要先理解語意再翻譯。
+
 中文 → 泰文 特別要求：
-20. 必須像泰國人จริงๆ在 LINE 聊天
-21. 優先使用自然短句
-22. 避免教科書語氣
-23. 避免過度正式
-24. 可省略不必要主詞，只要意思清楚自然
+25. 必須像泰國人真的在 LINE 聊天
+26. 優先使用自然短句
+27. 避免教科書語氣
+28. 避免過度正式
+29. 可省略不必要主詞，只要意思清楚自然
 
 泰文 → 中文 特別要求：
-25. 不要保留泰文語序
-26. 必須先理解意思，再翻成自然中文
-27. 中文要像台灣人聊天，不要出現怪句
+30. 不要保留泰文語序
+31. 必須先理解意思，再翻成自然中文
+32. 中文要像台灣人聊天，不要出現怪句
 
 精準詞義規則：
-28. 泰文中的「ออก / ออกมา / ออกไป」不可固定翻法，必須依上下文判斷是：
+33. 泰文中的「ออก / ออกมา / ออกไป」不可固定翻法，必須依上下文判斷是：
     離開 / 出去 / 出來 / 到場 / 走了 / 去了
-29. 如果原意是離開、出去、走掉，就必須翻成：
+34. 如果原意是離開、出去、走掉，就必須翻成：
     離開 / 出去 / 走了
     不可以錯翻成「出來」
-30. 如果原意是出現、到場、出來上班、出來見人，才可以翻成：
+35. 如果原意是出現、到場、出來上班、出來見人，才可以翻成：
     出來 / 到場 / 來了
-31. 「ไป / มา / กลับ / ส่ง / รับ」都必須依上下文判斷，不可固定單一翻法
-32. 優先保留真正語意，不要為了口語化改變方向性意思
+36. 「ไป / มา / กลับ / ส่ง / รับ」都必須依上下文判斷，不可固定單一翻法
+37. 優先保留真正語意，不要為了口語化改變方向性意思
 
 數字與代碼保留規則：
-33. 原文中的所有數字、編號、代碼、斜線格式、時間格式都必須完整保留
-34. 例如 2030/60/1/2700 必須原樣保留
-35. 不可刪除、不可改寫、不可省略
-36. 如果原文是「代碼 + 句子」，翻譯時要保留代碼，再翻譯後面的句子
-37. 不可以因為口語化而省略數字或代碼
+38. 原文中的所有數字、編號、代碼、斜線格式、時間格式都必須完整保留
+39. 例如 2030/60/1/2700 必須原樣保留
+40. 不可刪除、不可改寫、不可省略
+41. 如果原文是「代碼 + 句子」，翻譯時要保留代碼，再翻譯後面的句子
+42. 不可以因為口語化而省略數字或代碼
 
 輸出格式規則：
-38. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
-39. 如果要求翻成「泰文」，只輸出泰文
-40. 如果要求翻成「繁體中文」，只輸出繁體中文
+43. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
+44. 如果要求翻成「泰文」，只輸出泰文
+45. 如果要求翻成「繁體中文」，只輸出繁體中文
 `;
 
   const styles = {
@@ -381,7 +427,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   v5.2.1 翻譯引擎
+   v5.3 超強聊天翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
@@ -603,7 +649,9 @@ async function handleEvent(event) {
           .join("\n")
       : translatedBody;
 
-    return reply(event, finalResult);
+    const senderProfile = await getSenderProfile(event);
+
+    return reply(event, finalResult, senderProfile);
 
   } catch (err) {
     console.error("❌ HANDLE EVENT ERROR:", err);
