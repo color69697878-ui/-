@@ -228,7 +228,6 @@ function shouldIgnoreMessage(text) {
 
   const lower = t.toLowerCase();
 
-  // 這裡保留有意思的語助詞與短詞，不忽略
   const ignoreList = new Set([
     "ok", "okay", "k", "kk", "okok",
     "lol", "lmao", "haha", "hah", "555", "5555",
@@ -257,10 +256,7 @@ function looksLikeTranslatableText(text) {
   const hasEnglish = /[a-zA-Z]/.test(t);
   const hasDigits = /\d/.test(t);
 
-  // 純數字 / 純符號
   if (/^[\d\s/._\-:+]+$/.test(t)) return false;
-
-  // 像 In6 / A12 / B7 的短代碼
   if (/^[a-zA-Z]{1,3}\d{1,4}$/i.test(t)) return false;
 
   if (hasChinese) return true;
@@ -342,11 +338,61 @@ function translateChineseChatWord(text) {
 }
 
 /* =========================
+   上下文判斷
+========================= */
+
+function isSleepQuestion(text) {
+  const t = text.trim();
+  const patterns = [
+    /沒睡/,
+    /有没有睡/,
+    /有沒有睡/,
+    /睡了嗎/,
+    /昨晚.*睡/,
+    /เมื่อคืน.*นอน/,
+    /ได้นอน/,
+    /ยังไม่นอน/,
+    /นอนหรือ/,
+    /นอนไหม/
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+function isConfirmationQuestion(text) {
+  const t = text.trim();
+  const patterns = [
+    /對嗎/,
+    /是嗎/,
+    /是不是/,
+    /有.*嗎/,
+    /今天有/,
+    /今天.*對吧/,
+    /ใช่ไหม/,
+    /หรือเปล่า/,
+    /ไหม/,
+    /มั้ย/
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+/* =========================
    泰文聊天短詞 + 動作語境快翻
 ========================= */
 
-function translateThaiChatWord(text) {
+function translateThaiChatWord(text, previousText = "") {
   const t = text.trim();
+
+  if (["นอน", "นอนค่ะ", "นอนครับ"].includes(t) && isSleepQuestion(previousText)) {
+    return "有睡";
+  }
+
+  if (["ค่ะ", "คะ", "ครับ"].includes(t) && isConfirmationQuestion(previousText)) {
+    return "對";
+  }
+
+  if (["ใช่ค่ะ", "ใช่ครับ"].includes(t)) {
+    return "對";
+  }
 
   const directDict = {
     "ค่ะ": "好",
@@ -376,7 +422,11 @@ function translateThaiChatWord(text) {
     "มาไหม": "要來嗎",
     "ไปไหม": "要去嗎",
     "ไม่ไป": "不去",
-    "ไม่มา": "不來"
+    "ไม่มา": "不來",
+
+    "นอน": "睡",
+    "นอนค่ะ": "睡了",
+    "นอนครับ": "睡了"
   };
 
   if (directDict[t]) return directDict[t];
@@ -390,8 +440,6 @@ function translateThaiChatWord(text) {
     "กลับครับ": "會回去",
     "ได้ค่ะ": "可以",
     "ได้ครับ": "可以",
-    "ใช่ค่ะ": "對",
-    "ใช่ครับ": "對",
     "ยังค่ะ": "還沒",
     "ยังครับ": "還沒",
     "ไม่ค่ะ": "不要",
@@ -423,6 +471,24 @@ function translateEnglishChatWord(text) {
   };
 
   return dict[t] || "";
+}
+
+/* =========================
+   清理中文多餘語助詞
+========================= */
+
+function cleanupChineseTone(text) {
+  return text
+    .replace(/^好啦$/g, "好")
+    .replace(/^可以啦$/g, "可以")
+    .replace(/^對啦$/g, "對")
+    .replace(/^會去啦$/g, "會去")
+    .replace(/^會來啦$/g, "會來")
+    .replace(/^去啦$/g, "去")
+    .replace(/^來啦$/g, "來")
+    .replace(/^還沒啦$/g, "還沒")
+    .replace(/^不要啦$/g, "不要")
+    .replace(/^是啦$/g, "是");
 }
 
 /* =========================
@@ -459,74 +525,79 @@ function buildStyleInstructions(style) {
 21. 如果自然口語和原意衝突，優先保留原意
 22. 必須做語境理解，不要只看單字
 23. 模糊詞、方向詞、狀態詞要依整句上下文判斷
+24. 中文翻譯請避免無故添加「啦、呀、呢、喔、哦」等語助詞
+25. 只有原文明顯帶有撒嬌、強烈口語、催促或特定情緒時，才可少量加入語助詞
+26. 若原文只是普通回答、普通陳述、普通同意，請用乾淨自然的中文，不要自行加「啦」
 
 拼字修正與語意理解規則：
-24. 如果原文有明顯錯字、漏字、簡寫、打錯字、聊天式亂打，先自動理解最可能的原意，再翻譯
-25. 不要把明顯錯字照抄進翻譯
-26. 例如泰文像「ฉันย่านร้าน」這種不自然寫法，要先推測最可能原意，例如「ฉันอยู่ร้าน」，再翻譯
-27. 如果英文有小拼字錯誤，例如 customer / custumer / costumer，要根據上下文理解後再翻譯
-28. 中文若有少字、錯字，也要先理解語意再翻譯
+27. 如果原文有明顯錯字、漏字、簡寫、打錯字、聊天式亂打，先自動理解最可能的原意，再翻譯
+28. 不要把明顯錯字照抄進翻譯
+29. 例如泰文像「ฉันย่านร้าน」這種不自然寫法，要先推測最可能原意，例如「ฉันอยู่ร้าน」，再翻譯
+30. 如果英文有小拼字錯誤，例如 customer / custumer / costumer，要根據上下文理解後再翻譯
+31. 中文若有少字、錯字，也要先理解語意再翻譯
 
 中文 → 泰文 特別要求：
-29. 必須像泰國人真的在 LINE 聊天
-30. 優先使用自然短句
-31. 避免教科書語氣
-32. 避免過度正式
-33. 可省略不必要主詞，只要意思清楚自然
+32. 必須像泰國人真的在 LINE 聊天
+33. 優先使用自然短句
+34. 避免教科書語氣
+35. 避免過度正式
+36. 可省略不必要主詞，只要意思清楚自然
 
 泰文 → 中文 特別要求：
-34. 不要保留泰文語序
-35. 必須先理解意思，再翻成自然中文
-36. 中文要像台灣人聊天，不要出現怪句
+37. 不要保留泰文語序
+38. 必須先理解意思，再翻成自然中文
+39. 中文要像台灣人聊天，不要出現怪句
 
 泰文動作語境規則：
-37. 對於泰文中的動作與方向詞，必須依上下文理解：
+40. 對於泰文中的動作與方向詞，必須依上下文理解：
     - ไป / มา / กลับ
     - ออก / ออกไป / ออกมา
     - ขึ้น / ลง
     - ส่ง / รับ
-38. 不可固定翻法，必須看整句語境與對話脈絡判斷
-39. 「ไป」單獨作回答時通常是「去」
-40. 「ไปค่ะ / ไปครับ」作回答時通常是「會去」
-41. 「ไปดิ」通常是「去啊」
-42. 「ไปไหน」通常是「要去哪」
-43. 「มา」單獨作回答時通常是「來」
-44. 「มาค่ะ / มาครับ」作回答時通常是「會來」
-45. 「มาดิ」通常是「來啊」
-46. 「มาไหม」通常是「要來嗎」
-47. 「กลับ」依上下文可為「回去 / 回來」
-48. 「ออกไป」通常偏向「出去 / 離開」
-49. 「ออกมา」通常偏向「出來」
-50. 如果原意是離開、走掉、出去，就不得翻成「出來」
-51. 如果原意是出現、到場、出來見人、出來上班，才可翻成「出來 / 到場 / 來了」
+41. 不可固定翻法，必須看整句語境與對話脈絡判斷
+42. 「ไป」單獨作回答時通常是「去」
+43. 「ไปค่ะ / ไปครับ」作回答時通常是「會去」
+44. 「ไปดิ」通常是「去啊」
+45. 「ไปไหน」通常是「要去哪」
+46. 「มา」單獨作回答時通常是「來」
+47. 「มาค่ะ / มาครับ」作回答時通常是「會來」
+48. 「มาดิ」通常是「來啊」
+49. 「มาไหม」通常是「要來嗎」
+50. 「กลับ」依上下文可為「回去 / 回來」
+51. 「ออกไป」通常偏向「出去 / 離開」
+52. 「ออกมา」通常偏向「出來」
+53. 如果原意是離開、走掉、出去，就不得翻成「出來」
+54. 如果原意是出現、到場、出來見人、出來上班，才可翻成「出來 / 到場 / 來了」
 
 泰文聊天短詞規則：
-52. 泰文單獨回覆的短詞要依聊天語境翻譯：
+55. 泰文單獨回覆的短詞要依聊天語境翻譯：
     - ยัง → 還沒
-    - ค่ะ / คะ / ครับ → 好 / 嗯 / 是
+    - ค่ะ / คะ / ครับ → 對 / 是 / 好
     - ใช่ → 對
     - ได้ → 可以
-53. 如果「ยัง」是單獨回答問題，優先翻成「還沒」，不是「還是」
-54. 如果「ค่ะ / ครับ」是單獨回覆，優先翻成「好」或「嗯」，不要忽略
-55. 這些短詞若單獨出現，也要翻譯，不可以省略
+56. 如果「ยัง」是單獨回答問題，優先翻成「還沒」，不是「還是」
+57. 如果「ค่ะ / ครับ」是在回答確認句、是非題、對嗎這類問題，優先翻成「對」或「是」
+58. 如果「ค่ะ / ครับ」只是一般禮貌回覆，才翻成「好」
+59. 如果「นอน / นอนค่ะ / นอนครับ」是在回答「有沒有睡」這類問題，優先翻成「有睡 / 睡了」，不是「要睡了」
+60. 這些短詞若單獨出現，也要翻譯，不可以省略
 
 細膩語意規則：
-56. 如果句子是感情句或抽象句，優先理解整體情感與關係，再翻譯
-57. 如果句子像「แต่ฉันอยู่ห่างจากคุณได้ไม่นาน ฉันรู้ตัวฉันดี」
+61. 如果句子是感情句或抽象句，優先理解整體情感與關係，再翻譯
+62. 如果句子像「แต่ฉันอยู่ห่างจากคุณได้ไม่นาน ฉันรู้ตัวฉันดี」
     必須優先理解為「沒辦法離你太久」這種關係語意，
     不可草率翻成「我離你不遠」
 
 數字與代碼保留規則：
-58. 原文中的所有數字、編號、代碼、斜線格式、時間格式都必須完整保留
-59. 例如 2030/60/1/2700 必須原樣保留
-60. 不可刪除、不可改寫、不可省略
-61. 如果原文是「代碼 + 句子」，翻譯時要保留代碼，再翻譯後面的句子
-62. 不可以因為口語化而省略數字或代碼
+63. 原文中的所有數字、編號、代碼、斜線格式、時間格式都必須完整保留
+64. 例如 2030/60/1/2700 必須原樣保留
+65. 不可刪除、不可改寫、不可省略
+66. 如果原文是「代碼 + 句子」，翻譯時要保留代碼，再翻譯後面的句子
+67. 不可以因為口語化而省略數字或代碼
 
 輸出格式規則：
-63. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
-64. 如果要求翻成「泰文」，只輸出泰文
-65. 如果要求翻成「繁體中文」，只輸出繁體中文
+68. 如果要求翻成「繁體中文和泰文」，第一行繁體中文，第二行泰文
+69. 如果要求翻成「泰文」，只輸出泰文
+70. 如果要求翻成「繁體中文」，只輸出繁體中文
 `;
 
   const styles = {
@@ -578,7 +649,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   v6.5 泰國聊天理解 AI
+   v6.5.2 修正版翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
@@ -591,7 +662,7 @@ async function translate(text, lang, style = "auto") {
   try {
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: style === "precise" ? 0.1 : 0.28,
+      temperature: style === "precise" ? 0.1 : 0.25,
       messages: [
         {
           role: "system",
@@ -604,9 +675,11 @@ async function translate(text, lang, style = "auto") {
       ]
     });
 
-    const result = r.choices[0].message.content.trim();
+    let result = r.choices[0].message.content.trim();
 
     if (!result) return "";
+
+    result = cleanupChineseTone(result);
 
     setCachedTranslation(text, lang, style, result);
     return result;
@@ -789,9 +862,14 @@ async function handleEvent(event) {
       return;
     }
 
-    /* 中文短詞快翻 */
+    let previousText = "";
+    if (event.message?.quotedMessage?.text) {
+      previousText = event.message.quotedMessage.text;
+    }
 
     const bodySource = detectLang(body);
+
+    /* 中文短詞快翻 */
 
     if (bodySource === "zh") {
       const fastZhWord = translateChineseChatWord(body);
@@ -802,10 +880,10 @@ async function handleEvent(event) {
       }
     }
 
-    /* 泰文聊天短詞 / 動作短句快翻 */
+    /* 泰文聊天短詞 / 動作短句快翻（帶前一句上下文） */
 
     if (bodySource === "th") {
-      const fastThaiWord = translateThaiChatWord(body);
+      const fastThaiWord = translateThaiChatWord(body, previousText);
 
       if (fastThaiWord) {
         const senderProfile = await getSenderProfile(event);
