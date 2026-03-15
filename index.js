@@ -263,7 +263,19 @@ function looksLikeTranslatableText(text) {
   if (hasThai) return true;
 
   if (hasEnglish) {
+    const lower = t.toLowerCase();
+    const words = lower.match(/[a-zA-Z]+/g) || [];
+
+    const weakEnglishWords = new Set([
+      "in", "on", "at", "to", "of", "for", "by", "up", "as", "an", "a", "the"
+    ]);
+
+    if (words.length === 1 && weakEnglishWords.has(lower)) {
+      return false;
+    }
+
     if (hasDigits && t.length <= 12) return false;
+
     return true;
   }
 
@@ -458,6 +470,12 @@ function translateThaiChatWord(text, previousText = "") {
 function translateEnglishChatWord(text) {
   const t = text.trim().toLowerCase();
 
+  const ignoreWords = new Set([
+    "in", "on", "at", "to", "of", "for", "by", "a", "an", "the"
+  ]);
+
+  if (ignoreWords.has(t)) return "__IGNORE__";
+
   const dict = {
     "yes": "對\nใช่",
     "no": "不要\nไม่",
@@ -649,7 +667,7 @@ function buildStyleInstructions(style) {
 }
 
 /* =========================
-   v6.5.2 修正版翻譯引擎
+   v6.5.3 完整版翻譯引擎
 ========================= */
 
 async function translate(text, lang, style = "auto") {
@@ -896,6 +914,10 @@ async function handleEvent(event) {
 
     if (bodySource === "en") {
       const fastEnWord = translateEnglishChatWord(body);
+
+      if (fastEnWord === "__IGNORE__") {
+        return;
+      }
 
       if (fastEnWord) {
         const senderProfile = await getSenderProfile(event);
