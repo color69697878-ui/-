@@ -442,7 +442,7 @@ async function getSenderProfile(event) {
 
     return profile;
   } catch (err) {
-    console.error("⚠️ 取得 sender profile 失敗:", err?.message || err);
+    console.error("⚠️ 取得 sender profile 失敗:", extractErrorDetail(err));
     return null;
   }
 }
@@ -459,14 +459,35 @@ function isGroupOrRoom(event) {
   return event.source.type === "group" || event.source.type === "room";
 }
 
+function extractErrorDetail(err) {
+  return (
+    err?.originalError?.response?.data ||
+    err?.response?.data ||
+    err?.message ||
+    err
+  );
+}
+
+function sanitizeSenderName(name = "") {
+  return name
+    .replace(/[\p{Extended_Pictographic}]/gu, "")
+    .replace(/[\u200B-\u200D\uFE0F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 20);
+}
+
 function buildSender(profile) {
   if (!profile || !profile.displayName) return undefined;
 
+  const safeName = sanitizeSenderName(profile.displayName);
+  if (!safeName) return undefined;
+
   const sender = {
-    name: profile.displayName
+    name: safeName
   };
 
-  if (profile.pictureUrl) {
+  if (profile.pictureUrl && /^https:\/\//.test(profile.pictureUrl)) {
     sender.iconUrl = profile.pictureUrl;
   }
 
@@ -479,12 +500,27 @@ async function reply(event, text, senderProfile = null) {
     text
   };
 
-  const sender = buildSender(senderProfile);
-  if (sender) {
-    message.sender = sender;
-  }
+  try {
+    const sender = buildSender(senderProfile);
 
-  return client.replyMessage(event.replyToken, message);
+    if (sender?.name) {
+      message.sender = sender;
+    }
+
+    return await client.replyMessage(event.replyToken, message);
+  } catch (err) {
+    console.error("⚠️ 帶 sender 回覆失敗，改用純文字重送:", extractErrorDetail(err));
+
+    try {
+      return await client.replyMessage(event.replyToken, {
+        type: "text",
+        text
+      });
+    } catch (err2) {
+      console.error("❌ 純文字回覆也失敗:", extractErrorDetail(err2));
+      return;
+    }
+  }
 }
 
 /* =========================
@@ -1029,7 +1065,7 @@ async function translate(text, lang, style = "auto", contextText = "") {
 
     return result;
   } catch (err) {
-    console.error("❌ OPENAI ERROR:", err);
+    console.error("❌ OPENAI ERROR:", extractErrorDetail(err));
     return "";
   }
 }
@@ -1044,7 +1080,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     await Promise.all(req.body.events.map(handleEvent));
   } catch (err) {
-    console.error("❌ WEBHOOK ERROR:", err);
+    console.error("❌ WEBHOOK ERROR:", extractErrorDetail(err));
   }
 
   res.sendStatus(200);
@@ -1360,7 +1396,7 @@ async function handleEvent(event) {
     return reply(event, finalResult, senderProfile);
 
   } catch (err) {
-    console.error("❌ HANDLE EVENT ERROR:", err);
+    console.error("❌ HANDLE EVENT ERROR:", extractErrorDetail(err));
     return;
   }
 }
