@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.2 START");
+console.log("🚀 BOT v4.3 START");
 
 /* =========================
    LINE
@@ -28,6 +28,13 @@ const openai = new OpenAI({
 });
 
 /* =========================
+   APP
+========================= */
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+/* =========================
    DB（防爆版）
 ========================= */
 
@@ -36,11 +43,23 @@ const DB_FILE = "./db.json";
 function loadDB() {
   try {
     if (!fs.existsSync(DB_FILE)) {
-      fs.writeFileSync(DB_FILE, JSON.stringify({ dicts: {} }, null, 2));
+      fs.writeFileSync(DB_FILE, JSON.stringify({ dicts: {} }, null, 2), "utf8");
     }
-    return JSON.parse(fs.readFileSync(DB_FILE));
+
+    const raw = fs.readFileSync(DB_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object") {
+      return { dicts: {} };
+    }
+
+    if (!parsed.dicts || typeof parsed.dicts !== "object") {
+      parsed.dicts = {};
+    }
+
+    return parsed;
   } catch (e) {
-    console.error("❌ DB 壞掉，重建", e);
+    console.error("❌ DB 讀取失敗，改用空資料:", e?.message || e);
     return { dicts: {} };
   }
 }
@@ -49,14 +68,14 @@ let db = loadDB();
 
 function saveDB() {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
   } catch (e) {
-    console.error("❌ DB 儲存失敗", e);
+    console.error("❌ DB 儲存失敗:", e?.message || e);
   }
 }
 
 /* =========================
-   工具（防爆）
+   工具
 ========================= */
 
 function safeGetId(event) {
@@ -73,53 +92,112 @@ function safeGetId(event) {
 }
 
 function getDict(id) {
-  if (!id) id = "default";
-  if (!db.dicts) db.dicts = {};
-  if (!db.dicts[id]) db.dicts[id] = {};
-  return db.dicts[id];
+  const safeId = id || "default";
+
+  if (!db || typeof db !== "object") db = { dicts: {} };
+  if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
+  if (!db.dicts[safeId] || typeof db.dicts[safeId] !== "object") {
+    db.dicts[safeId] = {};
+  }
+
+  return db.dicts[safeId];
+}
+
+function setDict(id, source, target) {
+  const safeId = id || "default";
+  const dict = getDict(safeId);
+  dict[source] = target;
+  saveDB();
+}
+
+function deleteDict(id, source) {
+  const safeId = id || "default";
+  const dict = getDict(safeId);
+
+  if (!(source in dict)) return false;
+
+  delete dict[source];
+  saveDB();
+  return true;
+}
+
+function buildDictList(id) {
+  const dict = getDict(id);
+  const entries = Object.entries(dict);
+
+  if (!entries.length) return "目前沒有自訂詞典";
+
+  return entries
+    .slice(0, 100)
+    .map(([k, v], i) => `${i + 1}. ${k} => ${v}`)
+    .join("\n");
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /* =========================
    語言判斷
 ========================= */
 
-function detectLang(text) {
+function detectLang(text = "") {
   if (/[\u0E00-\u0E7F]/.test(text)) return "th";
   if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
   return "en";
 }
 
 /* =========================
-   fallback（永遠有回）
+   fallback
 ========================= */
 
-function fallback(text, lang) {
-  if (lang === "zh") return "（暫時無法翻譯泰文）";
-  if (lang === "th") return "（暫時無法翻譯中文）";
-  return "（翻譯暫時不可用）";
+function fallbackMessage(lang) {
+  if (lang === "zh") return "稍等一下我再翻一次 🙏";
+  if (lang === "th") return "ขอเวลาสักครู่ เดี๋ยวฉันแปลให้อีกครั้ง 🙏";
+  return "Please wait a moment, I’ll translate it again 🙏";
 }
 
 /* =========================
-   OpenAI（防爆+retry）
+   OpenAI 翻譯（穩定版）
 ========================= */
 
 async function translate(text, target) {
-  for (let i = 0; i < 2; i++) {
+  const maxAttempts = 3;
+
+  for (let i = 0; i < maxAttempts; i++) {
     try {
+      console.log(`🧠 OpenAI 翻譯中，第 ${i + 1}/${maxAttempts} 次`);
+
       const r = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        timeout: 15000,
+        timeout: 30000,
         messages: [
-          { role: "system", content: "只輸出翻譯結果" },
-          { role: "user", content: `翻譯成${target}：${text}` }
+          {
+            role: "system",
+            content: "你是翻譯助手，只輸出翻譯結果，不要解釋，不要加引號，不要加前言。"
+          },
+          {
+            role: "user",
+            content: `請翻譯成${target}：${text}`
+          }
         ]
       });
 
-      const result = r.choices?.[0]?.message?.content?.trim();
-      if (result) return result;
+      const result = r?.choices?.[0]?.message?.content?.trim();
 
+      if (result) {
+        console.log("✅ OpenAI 翻譯成功");
+        return result;
+      }
+
+      console.log("⚠️ OpenAI 有回應，但內容是空的");
     } catch (e) {
-      console.error("❌ OpenAI error:", e.message);
+      console.error(`❌ OpenAI error 第 ${i + 1} 次:`, e?.message || e);
+    }
+
+    if (i < maxAttempts - 1) {
+      console.log("⏳ 1 秒後重試 OpenAI...");
+      await sleep(1000);
     }
   }
 
@@ -127,112 +205,221 @@ async function translate(text, target) {
 }
 
 /* =========================
-   LINE reply（防爆+retry）
+   LINE reply（穩定版）
 ========================= */
 
-async function safeReply(token, text) {
-  for (let i = 0; i < 2; i++) {
+async function safeReply(replyToken, text) {
+  const maxAttempts = 2;
+
+  for (let i = 0; i < maxAttempts; i++) {
     try {
-      await client.replyMessage(token, {
+      await client.replyMessage(replyToken, {
         type: "text",
-        text: text.slice(0, 5000),
+        text: String(text || "").slice(0, 5000),
       });
-      console.log("✅ 回覆成功");
+
+      console.log("✅ reply 成功");
       return true;
     } catch (e) {
-      console.error("❌ reply error:", e.message);
+      console.error(`❌ reply error 第 ${i + 1} 次:`, e?.message || e);
     }
   }
+
   return false;
 }
 
 /* =========================
-   主邏輯（防爆）
+   短句快翻
+========================= */
+
+function thaiFast(text) {
+  const t = text.trim();
+
+  const dict = {
+    "ค่ะ": "好",
+    "ครับ": "好",
+    "ใช่": "對",
+    "ใช่ค่ะ": "對",
+    "ใช่ครับ": "對",
+    "ได้": "可以",
+    "ได้ค่ะ": "可以",
+    "ได้ครับ": "可以",
+    "ยัง": "還沒",
+    "ไป": "去",
+    "มา": "來",
+  };
+
+  return dict[t] || "";
+}
+
+/* =========================
+   handleEvent
 ========================= */
 
 async function handleEvent(event) {
   try {
-    if (!event || event.type !== "message") return;
-    if (event.message.type !== "text") return;
+    if (!event) {
+      console.log("⚠️ event 不存在");
+      return;
+    }
 
-    const text = event.message.text?.trim();
-    if (!text) return;
+    if (!event.source) {
+      console.log("⚠️ event.source 不存在");
+      return;
+    }
 
-    console.log("📩 收到:", text);
+    if (event.type !== "message") return;
+    if (event.message?.type !== "text") return;
+
+    const text = event.message?.text?.trim();
+
+    if (!text) {
+      console.log("⚠️ 空訊息，略過");
+      return;
+    }
+
+    console.log("📩 收到訊息:", text);
 
     const id = safeGetId(event);
     console.log("🆔 id:", id);
 
+    /* 指令 */
+
+    if (text === "/ping") {
+      await safeReply(event.replyToken, "pong");
+      return;
+    }
+
+    if (text === "/dict list") {
+      await safeReply(event.replyToken, buildDictList(id));
+      return;
+    }
+
+    if (text.startsWith("/dict add ")) {
+      const raw = text.replace("/dict add ", "").trim();
+      const parts = raw.split("=>");
+
+      if (parts.length < 2) {
+        await safeReply(event.replyToken, "格式錯誤\n請使用：/dict add 原文 => 翻譯");
+        return;
+      }
+
+      const source = parts[0].trim();
+      const target = parts.slice(1).join("=>").trim();
+
+      if (!source || !target) {
+        await safeReply(event.replyToken, "格式錯誤\n請使用：/dict add 原文 => 翻譯");
+        return;
+      }
+
+      setDict(id, source, target);
+      await safeReply(event.replyToken, `✅ 已加入詞典\n${source} => ${target}`);
+      return;
+    }
+
+    if (text.startsWith("/dict del ")) {
+      const source = text.replace("/dict del ", "").trim();
+
+      if (!source) {
+        await safeReply(event.replyToken, "格式錯誤\n請使用：/dict del 原文");
+        return;
+      }
+
+      const ok = deleteDict(id, source);
+      await safeReply(
+        event.replyToken,
+        ok ? `✅ 已刪除：${source}` : "⚠️ 找不到這筆詞典"
+      );
+      return;
+    }
+
+    /* 詞典優先 */
+
     const dict = getDict(id);
 
-    /* 詞典 */
     if (dict[text]) {
+      console.log("📚 命中自訂詞典");
       await safeReply(event.replyToken, dict[text]);
       return;
     }
 
-    /* AI */
-    const lang = detectLang(text);
-    const target = lang === "zh" ? "泰文" : "中文";
+    /* 泰文短句快翻 */
 
-    console.log("🧠 翻譯中...");
+    if (detectLang(text) === "th") {
+      const fast = thaiFast(text);
+      if (fast) {
+        console.log("⚡ 命中泰文快翻");
+        await safeReply(event.replyToken, fast);
+        return;
+      }
+    }
+
+    /* AI 翻譯 */
+
+    const lang = detectLang(text);
+    let target = "中文";
+
+    if (lang === "zh") target = "泰文";
+    else if (lang === "th") target = "繁體中文";
+    else target = "繁體中文";
+
+    console.log("🧠 準備送 OpenAI，目標語言:", target);
 
     let result = await translate(text, target);
 
     if (!result) {
-      result = fallback(text, lang);
+      console.log("⚠️ OpenAI 最終失敗，使用 fallback");
+      result = fallbackMessage(lang);
     }
 
-    console.log("📤 回覆:", result);
+    console.log("📤 準備回覆:", result);
 
-    await safeReply(event.replyToken, result);
+    const ok = await safeReply(event.replyToken, result);
 
+    if (!ok) {
+      console.log("⚠️ reply 最終失敗");
+    }
   } catch (e) {
-    console.error("❌ handleEvent 爆掉:", e);
+    console.error("❌ handleEvent 爆掉:", e?.message || e);
 
     try {
-      await safeReply(
-        event.replyToken,
-        "⚠️ 系統忙碌中，請再試一次"
-      );
+      await safeReply(event?.replyToken, "⚠️ 系統忙碌中，請再試一次");
     } catch {}
   }
 }
 
 /* =========================
-   webhook（不會爆）
+   Routes
 ========================= */
 
-const app = express();
+app.get("/", (req, res) => {
+  res.send("BOT OK");
+});
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
+    console.log("📨 webhook 進來了，events:", req?.body?.events?.length || 0);
+
     await Promise.all(
-      req.body.events.map(async (event) => {
+      (req.body.events || []).map(async (event) => {
         try {
           await handleEvent(event);
         } catch (e) {
-          console.error("❌ event error:", e);
+          console.error("❌ event error:", e?.message || e);
         }
       })
     );
   } catch (e) {
-    console.error("❌ webhook error:", e);
+    console.error("❌ webhook error:", e?.message || e);
   }
 
   res.sendStatus(200);
 });
 
 /* =========================
-   啟動
+   Start
 ========================= */
 
-app.get("/", (req, res) => {
-  res.send("OK");
-});
-
-const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-  console.log("🚀 BOT v4.2 RUNNING");
+  console.log(`🚀 BOT v4.3 RUNNING ON PORT ${PORT}`);
 });
