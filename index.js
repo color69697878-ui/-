@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-const app = express();
+console.log("🚀 BOT v4.2 START");
 
 /* =========================
    LINE
@@ -28,72 +28,55 @@ const openai = new OpenAI({
 });
 
 /* =========================
-   DB
+   DB（防爆版）
 ========================= */
 
-const DB_FILE = "./groups.json";
+const DB_FILE = "./db.json";
 
 function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({ dicts: {} }, null, 2));
+  try {
+    if (!fs.existsSync(DB_FILE)) {
+      fs.writeFileSync(DB_FILE, JSON.stringify({ dicts: {} }, null, 2));
+    }
+    return JSON.parse(fs.readFileSync(DB_FILE));
+  } catch (e) {
+    console.error("❌ DB 壞掉，重建", e);
+    return { dicts: {} };
   }
-  return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
 let db = loadDB();
 
 function saveDB() {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  } catch (e) {
+    console.error("❌ DB 儲存失敗", e);
+  }
 }
 
 /* =========================
-   工具
+   工具（防爆）
 ========================= */
 
-function getId(event) {
-  return (
-    event.source.groupId ||
-    event.source.roomId ||
-    event.source.userId
-  );
+function safeGetId(event) {
+  try {
+    return (
+      event?.source?.groupId ||
+      event?.source?.roomId ||
+      event?.source?.userId ||
+      "default"
+    );
+  } catch {
+    return "default";
+  }
 }
-
-function isGroup(event) {
-  return event.source.type !== "user";
-}
-
-/* =========================
-   詞典
-========================= */
 
 function getDict(id) {
+  if (!id) id = "default";
+  if (!db.dicts) db.dicts = {};
   if (!db.dicts[id]) db.dicts[id] = {};
   return db.dicts[id];
-}
-
-/* =========================
-   記憶（v4）
-========================= */
-
-const memory = new Map();
-
-function pushMemory(id, text) {
-  if (!memory.has(id)) memory.set(id, []);
-  const arr = memory.get(id);
-  arr.push(text);
-  if (arr.length > 5) arr.shift();
-}
-
-function getContext(id) {
-  const arr = memory.get(id) || [];
-  const last = arr[arr.length - 1] || "";
-
-  return {
-    last,
-    isQuestion: /嗎|ไหม|มั้ย|\?$/.test(last),
-    isAction: /去嗎|來嗎|ไปไหม|มาไหม/.test(last),
-    isConfirm: /對嗎|ใช่ไหม/.test(last),
-  };
 }
 
 /* =========================
@@ -107,37 +90,17 @@ function detectLang(text) {
 }
 
 /* =========================
-   v4 泰文快翻
+   fallback（永遠有回）
 ========================= */
 
-function thaiFast(text, ctx) {
-  const t = text.trim();
-
-  if (t === "ยัง") return ctx.isQuestion ? "還沒" : "還";
-  if (["ค่ะ","ครับ"].includes(t)) {
-    if (ctx.isConfirm) return "對";
-    if (ctx.isQuestion) return "可以";
-    return "好";
-  }
-  if (t.includes("ไป")) return ctx.isAction ? "會去" : "去";
-  if (t.includes("มา")) return ctx.isAction ? "會來" : "來";
-  if (t === "ได้") return "可以";
-
-  return "";
-}
-
-/* =========================
-   fallback 翻譯
-========================= */
-
-function fallbackTranslate(text, lang) {
-  if (lang === "zh") return "（泰文翻譯暫時不可用）";
-  if (lang === "th") return "（中文翻譯暫時不可用）";
+function fallback(text, lang) {
+  if (lang === "zh") return "（暫時無法翻譯泰文）";
+  if (lang === "th") return "（暫時無法翻譯中文）";
   return "（翻譯暫時不可用）";
 }
 
 /* =========================
-   OpenAI 翻譯（含 retry）
+   OpenAI（防爆+retry）
 ========================= */
 
 async function translate(text, target) {
@@ -152,17 +115,19 @@ async function translate(text, target) {
         ]
       });
 
-      return r.choices[0].message.content.trim();
+      const result = r.choices?.[0]?.message?.content?.trim();
+      if (result) return result;
 
-    } catch (err) {
-      console.error("❌ OpenAI error:", err.message);
-      if (i === 1) return null;
+    } catch (e) {
+      console.error("❌ OpenAI error:", e.message);
     }
   }
+
+  return null;
 }
 
 /* =========================
-   reply（含 retry）
+   LINE reply（防爆+retry）
 ========================= */
 
 async function safeReply(token, text) {
@@ -170,71 +135,75 @@ async function safeReply(token, text) {
     try {
       await client.replyMessage(token, {
         type: "text",
-        text
+        text: text.slice(0, 5000),
       });
-      return;
-    } catch (err) {
-      console.error("❌ reply error:", err.message);
+      console.log("✅ 回覆成功");
+      return true;
+    } catch (e) {
+      console.error("❌ reply error:", e.message);
     }
   }
+  return false;
 }
 
 /* =========================
-   主邏輯
+   主邏輯（防爆）
 ========================= */
 
 async function handleEvent(event) {
   try {
-    if (event.type !== "message") return;
+    if (!event || event.type !== "message") return;
     if (event.message.type !== "text") return;
 
-    const text = event.message.text.trim();
-    const id = getId(event);
-
+    const text = event.message.text?.trim();
     if (!text) return;
 
-    const ctx = getContext(id);
+    console.log("📩 收到:", text);
+
+    const id = safeGetId(event);
+    console.log("🆔 id:", id);
+
+    const dict = getDict(id);
 
     /* 詞典 */
-    const dict = getDict(id);
     if (dict[text]) {
       await safeReply(event.replyToken, dict[text]);
-      pushMemory(id, text);
       return;
-    }
-
-    /* 快翻 */
-    if (detectLang(text) === "th") {
-      const fast = thaiFast(text, ctx);
-      if (fast) {
-        await safeReply(event.replyToken, fast);
-        pushMemory(id, text);
-        return;
-      }
     }
 
     /* AI */
     const lang = detectLang(text);
     const target = lang === "zh" ? "泰文" : "中文";
 
+    console.log("🧠 翻譯中...");
+
     let result = await translate(text, target);
 
     if (!result) {
-      result = fallbackTranslate(text, lang);
+      result = fallback(text, lang);
     }
+
+    console.log("📤 回覆:", result);
 
     await safeReply(event.replyToken, result);
 
-    pushMemory(id, text);
+  } catch (e) {
+    console.error("❌ handleEvent 爆掉:", e);
 
-  } catch (err) {
-    console.error("❌ handleEvent error:", err);
+    try {
+      await safeReply(
+        event.replyToken,
+        "⚠️ 系統忙碌中，請再試一次"
+      );
+    } catch {}
   }
 }
 
 /* =========================
-   webhook（穩定版）
+   webhook（不會爆）
 ========================= */
+
+const app = express();
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
@@ -242,22 +211,28 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       req.body.events.map(async (event) => {
         try {
           await handleEvent(event);
-        } catch (err) {
-          console.error("❌ event error:", err);
+        } catch (e) {
+          console.error("❌ event error:", e);
         }
       })
     );
-  } catch (err) {
-    console.error("❌ webhook error:", err);
+  } catch (e) {
+    console.error("❌ webhook error:", e);
   }
 
   res.sendStatus(200);
 });
 
 /* =========================
-   start
+   啟動
 ========================= */
 
-app.listen(3000, () => {
-  console.log("🚀 BOT RUNNING v4.1 STABLE");
+app.get("/", (req, res) => {
+  res.send("OK");
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("🚀 BOT v4.2 RUNNING");
 });
