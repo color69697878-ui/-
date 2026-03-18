@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.4 START");
+console.log("🚀 BOT v4.5 START");
 
 /* =========================
    LINE
@@ -245,7 +245,6 @@ function thaiFast(text) {
     "ไปแล้ว": "去了",
     "กลับแล้ว": "回去了",
     "ออกไปแล้ว": "離開了",
-    "ออกมาแล้ว": "出來了",
   };
 
   return dict[t] || "";
@@ -291,6 +290,7 @@ function buildStyleInstruction(style) {
 如果原文有明顯錯字或口語亂打，要先理解最可能原意再翻譯。
 如果句中出現疑似地名、音譯詞、不明專有名詞，不可自行腦補成喝酒、夜店、上班等場景。
 若無法確定不明詞意思，優先保守翻成某個地方或直接保留主幹語意。
+如果原文較長，請優先保留整體意思，不要漏翻。
 `;
 
   const styles = {
@@ -307,7 +307,7 @@ function buildStyleInstruction(style) {
   return `${base}\n${styles[style] || styles.auto}`;
 }
 
-async function translate(text, target, style = "auto") {
+async function translateSingle(text, target, style = "auto") {
   const maxAttempts = 3;
 
   for (let i = 0; i < maxAttempts; i++) {
@@ -316,7 +316,7 @@ async function translate(text, target, style = "auto") {
 
       const r = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        timeout: 30000,
+        timeout: 40000,
         messages: [
           {
             role: "system",
@@ -348,6 +348,60 @@ async function translate(text, target, style = "auto") {
   }
 
   return null;
+}
+
+/* =========================
+   智慧分句
+========================= */
+
+function normalizeForSplit(text) {
+  return text
+    .replace(/因為/g, "，因為")
+    .replace(/但是/g, "，但是")
+    .replace(/可是/g, "，可是")
+    .replace(/所以/g, "，所以")
+    .replace(/如果/g, "，如果")
+    .replace(/แล้ว/g, " แล้ว ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitText(text) {
+  const normalized = normalizeForSplit(text);
+
+  const parts = normalized
+    .split(/[\n,，。.!！？?]/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (!parts.length) return [text];
+
+  return parts;
+}
+
+function shouldSplitText(text) {
+  if (!text) return false;
+  if (text.length >= 28) return true;
+  if (/因為|但是|可是|所以|如果|，|。|!|！|\?|\？/.test(text)) return true;
+  return false;
+}
+
+async function translateSmart(text, target, style = "auto", lang = "zh") {
+  if (!shouldSplitText(text)) {
+    return await translateSingle(text, target, style);
+  }
+
+  console.log("✂️ 啟用智慧分句翻譯");
+
+  const parts = splitText(text);
+  const translatedParts = [];
+
+  for (const part of parts) {
+    const r = await translateSingle(part, target, style);
+    translatedParts.push(r || fallbackMessage(lang));
+  }
+
+  return translatedParts.join("\n");
 }
 
 /* =========================
@@ -618,7 +672,7 @@ async function handleTextMessage(event) {
 
   console.log("🧠 準備送 OpenAI，目標語言:", target);
 
-  let result = await translate(text, target, style);
+  let result = await translateSmart(text, target, style, lang);
 
   if (!result) {
     console.log("⚠️ OpenAI 最終失敗，使用 fallback");
@@ -692,5 +746,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.4 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.5 RUNNING ON PORT ${PORT}`);
 });
