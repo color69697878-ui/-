@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6 START");
+console.log("🚀 BOT v4.6.1 START");
 
 /* =========================
    ENV CHECK
@@ -111,16 +111,13 @@ function saveDB() {
    RUNTIME CACHE
 ========================= */
 
-// 翻譯快取：避免同一句一直重打 OpenAI
 const translationCache = new Map(); // key -> { value, ts }
 const CACHE_TTL = 1000 * 60 * 10; // 10 分鐘
 const CACHE_MAX = 500;
 
-// 去重：同個聊天室短時間收到完全相同句子，只處理一次
 const recentMessageMap = new Map(); // dedupeKey -> ts
 const DEDUPE_TTL = 4000;
 
-// 簡易鎖：避免同一個聊天室併發過多
 const inflightByChat = new Map(); // chatId -> count
 const MAX_INFLIGHT_PER_CHAT = 2;
 
@@ -340,7 +337,6 @@ function shouldIgnoreText(text) {
   const t = String(text || "").trim();
   if (!t) return true;
 
-  // 單純貼 emoji 或符號就不翻
   if (/^[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+$/u.test(t) && t.length <= 8) {
     return true;
   }
@@ -355,10 +351,7 @@ function shouldIgnoreText(text) {
 function detectLang(text = "") {
   if (/[\u0E00-\u0E7F]/.test(text)) return "th";
   if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
-
-  // 有英文字母就當英文
   if (/[a-zA-Z]/.test(text)) return "en";
-
   return "unknown";
 }
 
@@ -366,6 +359,50 @@ function getTargetLanguage(lang) {
   if (lang === "zh") return "泰文";
   if (lang === "th") return "繁體中文";
   return "繁體中文";
+}
+
+/* =========================
+   高風險片語保護
+========================= */
+
+function protectedPhraseTranslate(text, lang) {
+  const t = String(text || "").trim();
+
+  if (lang === "th") {
+    const thMap = {
+      "แค่ต้องการมือถือคืน ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน":
+        "我只是想把手機拿回來，我從昨天晚上就沒跟她聯絡了",
+      "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน":
+        "我從昨天晚上就沒跟她聯絡了",
+      "ฉันไม่ได้คุยกับเขาตั้งแต่เมื่อคืน":
+        "我從昨天晚上就沒跟他聯絡了",
+      "ขอมือถือคืน":
+        "把手機還給我",
+      "ขอคืน":
+        "把東西還給我",
+      "เอาคืน":
+        "拿回來",
+      "เอามือถือคืน":
+        "把手機拿回來",
+      "แค่ต้องการมือถือคืน":
+        "我只是想把手機拿回來",
+    };
+
+    if (thMap[t]) return thMap[t];
+  }
+
+  if (lang === "zh") {
+    const zhMap = {
+      "我從昨天晚上就沒跟她說話了": "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
+      "我從昨晚就沒跟她聯絡了": "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
+      "我只是想把手機拿回來": "แค่ต้องการเอามือถือคืน",
+      "把手機還給我": "ขอมือถือคืน",
+    };
+
+    if (zhMap[t]) return zhMap[t];
+  }
+
+  return "";
 }
 
 /* =========================
@@ -457,6 +494,20 @@ function buildStyleInstruction(style) {
 如果句中出現疑似地名、音譯詞、不明專有名詞，不可自行腦補成喝酒、夜店、上班等場景。
 若無法確定不明詞意思，優先保守翻成某個地方，或保留主幹語意。
 若原文非常短，請用最自然的短句翻譯，不要擴寫。
+
+嚴格保持人稱與關係方向正確：
+- 我對她 / 我對你 / 她對我 / 你對我，不可翻反。
+- 「我沒跟她說話」不可翻成「她沒跟我說話」。
+- 「我沒跟你說話」不可翻成「你沒跟我說話」。
+- 「跟她聯絡」與「她聯絡我」不可互換。
+- 「把手機拿回來」不可隨意翻成「把手機還給我」，除非原文明確表示對方要歸還。
+- 遇到 泰文「คุยกับ... / บอก... / ให้... / เอาคืน / ขอคืน / เอามือถือคืน」時，先判斷動作方向再翻譯。
+
+若句子裡有：
+- ฉัน = 我
+- เธอ = 你 / 她（依上下文判斷，但不可亂反轉）
+- เขา = 他 / 她
+請嚴格保持主詞與受詞方向。
 `;
 
   const styles = {
@@ -503,7 +554,12 @@ async function translate(text, target, style = "auto") {
             },
             {
               role: "user",
-              content: `請翻譯成${target}：${text}`,
+              content:
+                `請把這句聊天訊息翻譯成${target}。` +
+                `務必保持主詞、受詞、對象方向正確，` +
+                `不可把「我對她」翻成「她對我」，` +
+                `也不可把「拿回來」亂翻成「還給我」。` +
+                `只輸出翻譯結果：${text}`,
             },
           ],
         },
@@ -597,9 +653,11 @@ async function smartReply(event, text) {
 function buildHelpText(isOwnerUser = false) {
   let msg = `可用指令：
 
+/help
 /myid
 /groupid
 /mystyle
+/debuglang
 /dict list`;
 
   if (isOwnerUser) {
@@ -681,6 +739,11 @@ async function handleTextMessage(event) {
        指令優先
     ========================= */
 
+    if (text === "/help") {
+      await smartReply(event, buildHelpText(isOwner(event)));
+      return;
+    }
+
     if (text === "/myid") {
       await smartReply(event, event?.source?.userId || "查不到 userId");
       return;
@@ -700,17 +763,25 @@ async function handleTextMessage(event) {
       return;
     }
 
+    if (text === "/debuglang") {
+      const lang = detectLang(text);
+      await smartReply(event, `語言判斷測試用指令本身：${lang}`);
+      return;
+    }
+
+    if (text.startsWith("/debuglang ")) {
+      const raw = text.replace("/debuglang ", "").trim();
+      const lang = detectLang(raw);
+      await smartReply(event, `判斷結果：${lang}`);
+      return;
+    }
+
     if (text === "/dict list") {
       if (!isGroupOrRoom(event)) {
         await smartReply(event, "請在群組或聊天室使用");
         return;
       }
       await smartReply(event, buildDictList(id));
-      return;
-    }
-
-    if (text === "/help") {
-      await smartReply(event, buildHelpText(isOwner(event)));
       return;
     }
 
@@ -869,6 +940,13 @@ async function handleTextMessage(event) {
 
     const lang = detectLang(text);
 
+    const protectedResult = protectedPhraseTranslate(text, lang);
+    if (protectedResult) {
+      console.log("🛡️ 命中高風險片語保護");
+      await smartReply(event, protectedResult);
+      return;
+    }
+
     if (lang === "th") {
       const fast = thaiFast(text);
       if (fast) {
@@ -948,7 +1026,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6",
+    version: "4.6.1",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflightChats: inflightByChat.size,
@@ -983,5 +1061,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.1 RUNNING ON PORT ${PORT}`);
 });
