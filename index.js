@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.1 START");
+console.log("🚀 BOT v4.6.2 START");
 
 /* =========================
    ENV CHECK
@@ -386,6 +386,59 @@ function protectedPhraseTranslate(text, lang) {
         "把手機拿回來",
       "แค่ต้องการมือถือคืน":
         "我只是想把手機拿回來",
+
+      "เธอมาถึงกี่วันแล้วคะ":
+        "她來幾天了？",
+      "เธอมาถึงกี่วันแล้วค่ะ":
+        "她來幾天了？",
+      "เธอมาถึงกี่วันแล้ว":
+        "她來幾天了？",
+      "เขามาถึงกี่วันแล้วคะ":
+        "她來幾天了？",
+      "เขามาถึงกี่วันแล้วค่ะ":
+        "她來幾天了？",
+      "เขามาถึงกี่วันแล้ว":
+        "她來幾天了？",
+
+      "คุณบอกเค้าแล้วหรอคะ":
+        "妳跟她說了嗎？",
+      "คุณบอกเค้าแล้วหรอค่ะ":
+        "妳跟她說了嗎？",
+      "คุณบอกเค้าแล้วหรือคะ":
+        "妳跟她說了嗎？",
+      "คุณบอกเขาแล้วหรอคะ":
+        "妳跟她說了嗎？",
+      "คุณบอกเขาแล้วหรือคะ":
+        "妳跟她說了嗎？",
+      "คุณบอกเค้าแล้วหรอ":
+        "妳跟她說了嗎？",
+      "คุณบอกเขาแล้วหรอ":
+        "妳跟她說了嗎？",
+
+      "เธอนอนหรอ":
+        "她睡了嗎？",
+      "เธอนอนแล้วหรอ":
+        "她睡了嗎？",
+      "เขานอนหรอ":
+        "她睡了嗎？",
+      "เขานอนแล้วหรอ":
+        "她睡了嗎？",
+
+      "เธอมาแล้วหรอ":
+        "她到了嗎？",
+      "เธอมาแล้วหรอคะ":
+        "她到了嗎？",
+      "เขามาแล้วหรอ":
+        "她到了嗎？",
+      "เขามาแล้วหรอคะ":
+        "她到了嗎？",
+
+      "เธออยู่ไหน":
+        "她在哪裡？",
+      "เขาอยู่ไหน":
+        "她在哪裡？",
+      "เค้าอยู่ไหน":
+        "她在哪裡？",
     };
 
     if (thMap[t]) return thMap[t];
@@ -393,10 +446,24 @@ function protectedPhraseTranslate(text, lang) {
 
   if (lang === "zh") {
     const zhMap = {
-      "我從昨天晚上就沒跟她說話了": "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
-      "我從昨晚就沒跟她聯絡了": "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
-      "我只是想把手機拿回來": "แค่ต้องการเอามือถือคืน",
-      "把手機還給我": "ขอมือถือคืน",
+      "我從昨天晚上就沒跟她說話了":
+        "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
+      "我從昨晚就沒跟她聯絡了":
+        "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
+      "我只是想把手機拿回來":
+        "แค่ต้องการเอามือถือคืน",
+      "把手機還給我":
+        "ขอมือถือคืน",
+      "她來幾天了？":
+        "เธอมาถึงกี่วันแล้วคะ",
+      "妳跟她說了嗎？":
+        "คุณบอกเค้าแล้วหรอคะ",
+      "她睡了嗎？":
+        "เธอนอนแล้วหรอ",
+      "她到了嗎？":
+        "เธอมาแล้วหรอ",
+      "她在哪裡？":
+        "เธออยู่ไหน",
     };
 
     if (zhMap[t]) return zhMap[t];
@@ -501,12 +568,17 @@ function buildStyleInstruction(style) {
 - 「我沒跟你說話」不可翻成「你沒跟我說話」。
 - 「跟她聯絡」與「她聯絡我」不可互換。
 - 「把手機拿回來」不可隨意翻成「把手機還給我」，除非原文明確表示對方要歸還。
-- 遇到 泰文「คุยกับ... / บอก... / ให้... / เอาคืน / ขอคืน / เอามือถือคืน」時，先判斷動作方向再翻譯。
+
+嚴格根據上下文判斷代詞：
+- 泰文「เธอ」不可一律翻成你，可能是她。
+- 泰文「เขา / เค้า」不可一律翻成他，也可能是她。
+- 若句子明顯在討論第三人，不可翻成直接對話的你。
+- 看到「來幾天了、到了多久、跟她說了嗎、她有沒有來、她睡了嗎、她在哪裡」這類句型，優先判斷是否為第三人稱。
 
 若句子裡有：
 - ฉัน = 我
 - เธอ = 你 / 她（依上下文判斷，但不可亂反轉）
-- เขา = 他 / 她
+- เขา / เค้า = 他 / 她
 請嚴格保持主詞與受詞方向。
 `;
 
@@ -546,7 +618,7 @@ async function translate(text, target, style = "auto") {
       const r = await openai.chat.completions.create(
         {
           model: "gpt-4o-mini",
-          temperature: 0.2,
+          temperature: 0.15,
           messages: [
             {
               role: "system",
@@ -556,6 +628,9 @@ async function translate(text, target, style = "auto") {
               role: "user",
               content:
                 `請把這句聊天訊息翻譯成${target}。` +
+                `務必依聊天上下文判斷代詞：` +
+                `泰文的 เธอ 可能是你，也可能是她；เขา/เค้า 可能是他，也可能是她。` +
+                `如果句子是在談論第三人，不可翻成你。` +
                 `務必保持主詞、受詞、對象方向正確，` +
                 `不可把「我對她」翻成「她對我」，` +
                 `也不可把「拿回來」亂翻成「還給我」。` +
@@ -735,10 +810,6 @@ async function handleTextMessage(event) {
   }
 
   try {
-    /* =========================
-       指令優先
-    ========================= */
-
     if (text === "/help") {
       await smartReply(event, buildHelpText(isOwner(event)));
       return;
@@ -784,8 +855,6 @@ async function handleTextMessage(event) {
       await smartReply(event, buildDictList(id));
       return;
     }
-
-    /* OWNER 指令 */
 
     if (isOwner(event)) {
       if (text === "/pending") {
@@ -911,23 +980,15 @@ async function handleTextMessage(event) {
       }
     }
 
-    /* 未授權群組，禁止翻譯 */
-
     if (isGroupOrRoom(event) && !isAllowed(id)) {
       await smartReply(event, "⛔ 此群組尚未授權");
       return;
     }
 
-    /* 其他 / 指令不處理也不翻譯 */
-
     if (text.startsWith("/")) {
       console.log("⚠️ 未知指令，略過翻譯:", text);
       return;
     }
-
-    /* =========================
-       翻譯流程
-    ========================= */
 
     const dict = getDict(id);
     const normalizedText = normalizeDictKey(text);
@@ -1026,7 +1087,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.1",
+    version: "4.6.2",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflightChats: inflightByChat.size,
@@ -1061,5 +1122,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.1 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.2 RUNNING ON PORT ${PORT}`);
 });
