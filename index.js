@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.2 START");
+console.log("🚀 BOT v4.6.6 START");
 
 /* =========================
    ENV CHECK
@@ -65,6 +65,7 @@ function createDefaultDB() {
     pending: [],
     styles: {},
     dicts: {},
+    globalDict: {},
   };
 }
 
@@ -87,6 +88,7 @@ function loadDB() {
     if (!Array.isArray(parsed.pending)) parsed.pending = [];
     if (!parsed.styles || typeof parsed.styles !== "object") parsed.styles = {};
     if (!parsed.dicts || typeof parsed.dicts !== "object") parsed.dicts = {};
+    if (!parsed.globalDict || typeof parsed.globalDict !== "object") parsed.globalDict = {};
 
     return parsed;
   } catch (e) {
@@ -115,11 +117,15 @@ const translationCache = new Map(); // key -> { value, ts }
 const CACHE_TTL = 1000 * 60 * 10; // 10 分鐘
 const CACHE_MAX = 500;
 
-const recentMessageMap = new Map(); // dedupeKey -> ts
+const recentMessageMap = new Map(); // key -> ts
 const DEDUPE_TTL = 4000;
 
 const inflightByChat = new Map(); // chatId -> count
 const MAX_INFLIGHT_PER_CHAT = 2;
+
+const profileCache = new Map(); // key -> { value, ts }
+const PROFILE_TTL = 1000 * 60 * 60 * 12; // 12 小時
+const PROFILE_CACHE_MAX = 2000;
 
 function now() {
   return Date.now();
@@ -149,28 +155,34 @@ function pruneCacheMap(map, ttl, maxSize = 1000) {
   }
 }
 
-function getCachedTranslation(key) {
-  const item = translationCache.get(key);
+function getCachedItem(map, key, ttl) {
+  const item = map.get(key);
   if (!item) return null;
-  if (now() - item.ts > CACHE_TTL) {
-    translationCache.delete(key);
+  if (now() - item.ts > ttl) {
+    map.delete(key);
     return null;
   }
   return item.value;
 }
 
+function setCachedItem(map, key, value, ttl, maxSize) {
+  pruneCacheMap(map, ttl, maxSize);
+  map.set(key, { value, ts: now() });
+}
+
+function getCachedTranslation(key) {
+  return getCachedItem(translationCache, key, CACHE_TTL);
+}
+
 function setCachedTranslation(key, value) {
-  pruneCacheMap(translationCache, CACHE_TTL, CACHE_MAX);
-  translationCache.set(key, { value, ts: now() });
+  setCachedItem(translationCache, key, value, CACHE_TTL, CACHE_MAX);
 }
 
 function isDuplicateMessage(chatId, text) {
   const key = `${chatId}__${text}`;
   pruneCacheMap(recentMessageMap, DEDUPE_TTL, 1000);
 
-  if (recentMessageMap.has(key)) {
-    return true;
-  }
+  if (recentMessageMap.has(key)) return true;
 
   recentMessageMap.set(key, now());
   return false;
@@ -232,6 +244,7 @@ function ensureDBShape(id) {
   if (!Array.isArray(db.pending)) db.pending = [];
   if (!db.styles || typeof db.styles !== "object") db.styles = {};
   if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
+  if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
 
   if (id) {
     if (!db.styles[id]) db.styles[id] = "auto";
@@ -285,13 +298,13 @@ function setStyle(id, style) {
   saveDB();
 }
 
+function normalizeDictKey(text = "") {
+  return String(text || "").trim();
+}
+
 function getDict(id) {
   ensureDBShape(id);
   return db.dicts[id] || {};
-}
-
-function normalizeDictKey(text = "") {
-  return String(text || "").trim();
 }
 
 function setDict(id, source, target) {
@@ -325,6 +338,44 @@ function buildDictList(id) {
     .join("\n")}`;
 }
 
+/* ===== 全域詞典 ===== */
+
+function getGlobalDict() {
+  ensureDBShape();
+  return db.globalDict || {};
+}
+
+function setGlobalDict(source, target) {
+  ensureDBShape();
+  const k = normalizeDictKey(source);
+  const v = String(target || "").trim();
+  if (!k || !v) return false;
+  db.globalDict[k] = v;
+  saveDB();
+  return true;
+}
+
+function deleteGlobalDict(source) {
+  ensureDBShape();
+  const k = normalizeDictKey(source);
+  if (!(k in db.globalDict)) return false;
+  delete db.globalDict[k];
+  saveDB();
+  return true;
+}
+
+function buildGlobalDictList() {
+  const dict = getGlobalDict();
+  const entries = Object.entries(dict);
+
+  if (!entries.length) return "目前沒有全域詞典";
+
+  return `全域詞典：\n\n${entries
+    .slice(0, 200)
+    .map(([k, v], i) => `${i + 1}. ${k} => ${v}`)
+    .join("\n")}`;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -345,13 +396,92 @@ function shouldIgnoreText(text) {
 }
 
 /* =========================
-   語言判斷
+   自動發話者頭像
 ========================= */
 
+function buildProfileCacheKey(event) {
+  const source = event?.source || {};
+  const chatId = source.groupId || source.roomId || source.userId || "default";
+  const userId = source.userId || "nouser";
+  const type = source.type || "unknown";
+  return `${type}:${chatId}:${userId}`;
+}
+
+async function fetchLineProfile(event) {
+  const source = event?.source || {};
+  const userId = source.userId;
+
+  if (!userId) return null;
+
+  const cacheKey = buildProfileCacheKey(event);
+  const cached = getCachedItem(profileCache, cacheKey, PROFILE_TTL);
+  if (cached !== null) return cached;
+
+  try {
+    let profile = null;
+
+    if (source.type === "user") {
+      profile = await client.getProfile(userId);
+    } else if (source.type === "group" && source.groupId) {
+      profile = await client.getGroupMemberProfile(source.groupId, userId);
+    } else if (source.type === "room" && source.roomId) {
+      profile = await client.getRoomMemberProfile(source.roomId, userId);
+    }
+
+    const name = String(profile?.displayName || "").trim();
+    const iconUrl = String(profile?.pictureUrl || "").trim();
+
+    if (!name || !iconUrl) {
+      setCachedItem(profileCache, cacheKey, null, PROFILE_TTL, PROFILE_CACHE_MAX);
+      return null;
+    }
+
+    const sender = {
+      name: name.slice(0, 20),
+      iconUrl,
+    };
+
+    setCachedItem(profileCache, cacheKey, sender, PROFILE_TTL, PROFILE_CACHE_MAX);
+    return sender;
+  } catch (e) {
+    console.error("❌ 取得 LINE profile 失敗:", {
+      message: e?.message || e,
+      sourceType: source.type,
+      groupId: source.groupId,
+      roomId: source.roomId,
+      userId,
+    });
+
+    setCachedItem(profileCache, cacheKey, null, PROFILE_TTL, PROFILE_CACHE_MAX);
+    return null;
+  }
+}
+
+/* =========================
+   語言判斷 / 混合內容判斷
+========================= */
+
+function hasThai(text = "") {
+  return /[\u0E00-\u0E7F]/.test(text);
+}
+
+function hasChinese(text = "") {
+  return /[\u4E00-\u9FFF]/.test(text);
+}
+
+function hasEnglish(text = "") {
+  return /[a-zA-Z]/.test(text);
+}
+
 function detectLang(text = "") {
-  if (/[\u0E00-\u0E7F]/.test(text)) return "th";
-  if (/[\u4E00-\u9FFF]/.test(text)) return "zh";
-  if (/[a-zA-Z]/.test(text)) return "en";
+  const hasTh = hasThai(text);
+  const hasZh = hasChinese(text);
+  const hasEn = hasEnglish(text);
+
+  if (hasTh && !hasZh) return "th";
+  if (hasZh && !hasTh) return "zh";
+  if (!hasTh && !hasZh && hasEn) return "en";
+  if (hasTh && hasZh) return "mixed";
   return "unknown";
 }
 
@@ -359,6 +489,43 @@ function getTargetLanguage(lang) {
   if (lang === "zh") return "泰文";
   if (lang === "th") return "繁體中文";
   return "繁體中文";
+}
+
+function isMixedZhTh(text = "") {
+  return hasThai(text) && hasChinese(text);
+}
+
+function isLikelyBilingualBlock(text = "") {
+  const lines = String(text)
+    .split("\n")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) return false;
+
+  let hasZhLine = false;
+  let hasThLine = false;
+
+  for (const line of lines) {
+    if (hasChinese(line)) hasZhLine = true;
+    if (hasThai(line)) hasThLine = true;
+  }
+
+  return hasZhLine && hasThLine;
+}
+
+function isShortText(text = "") {
+  return String(text || "").trim().length <= 6;
+}
+
+function shouldForceTranslate(text = "") {
+  const t = String(text || "").trim();
+  if (!t) return false;
+
+  if (t.length <= 6) return true;
+  if (/[嗎吗呢?？]$/.test(t)) return true;
+
+  return false;
 }
 
 /* =========================
@@ -574,12 +741,6 @@ function buildStyleInstruction(style) {
 - 泰文「เขา / เค้า」不可一律翻成他，也可能是她。
 - 若句子明顯在討論第三人，不可翻成直接對話的你。
 - 看到「來幾天了、到了多久、跟她說了嗎、她有沒有來、她睡了嗎、她在哪裡」這類句型，優先判斷是否為第三人稱。
-
-若句子裡有：
-- ฉัน = 我
-- เธอ = 你 / 她（依上下文判斷，但不可亂反轉）
-- เขา / เค้า = 他 / 她
-請嚴格保持主詞與受詞方向。
 `;
 
   const styles = {
@@ -646,16 +807,12 @@ async function translate(text, target, style = "auto") {
 
       const result = r?.choices?.[0]?.message?.content?.trim();
 
-      console.log("🧾 request id:", r?._request_id || "unknown");
-
       if (result) {
         const clean = safeText(result);
         setCachedTranslation(cacheKey, clean);
         console.log("✅ OpenAI 翻譯成功");
         return clean;
       }
-
-      console.log("⚠️ OpenAI 有回應但內容為空");
     } catch (e) {
       console.error(`❌ OpenAI error 第 ${i + 1} 次:`, {
         name: e?.name,
@@ -667,7 +824,6 @@ async function translate(text, target, style = "auto") {
     }
 
     if (i < maxAttempts - 1) {
-      console.log("⏳ 0.8 秒後重試 OpenAI...");
       await sleep(800);
     }
   }
@@ -679,14 +835,27 @@ async function translate(text, target, style = "auto") {
    LINE send
 ========================= */
 
-async function safeReply(replyToken, text) {
+function buildMessageObject(text, sender) {
+  const message = {
+    type: "text",
+    text: safeText(text),
+  };
+
+  if (sender?.name && sender?.iconUrl) {
+    message.sender = {
+      name: String(sender.name).slice(0, 20),
+      iconUrl: String(sender.iconUrl),
+    };
+  }
+
+  return message;
+}
+
+async function safeReply(replyToken, text, sender) {
   if (!replyToken) return false;
 
   try {
-    await client.replyMessage(replyToken, {
-      type: "text",
-      text: safeText(text),
-    });
+    await client.replyMessage(replyToken, buildMessageObject(text, sender));
     console.log("✅ reply 成功");
     return true;
   } catch (e) {
@@ -695,14 +864,11 @@ async function safeReply(replyToken, text) {
   }
 }
 
-async function safePush(to, text) {
+async function safePush(to, text, sender) {
   if (!to) return false;
 
   try {
-    await client.pushMessage(to, {
-      type: "text",
-      text: safeText(text),
-    });
+    await client.pushMessage(to, buildMessageObject(text, sender));
     console.log("✅ push 成功");
     return true;
   } catch (e) {
@@ -711,14 +877,14 @@ async function safePush(to, text) {
   }
 }
 
-async function smartReply(event, text) {
+async function smartReply(event, text, sender) {
   const pushTarget = getPushTarget(event);
 
-  const ok = await safeReply(event?.replyToken, text);
+  const ok = await safeReply(event?.replyToken, text, sender);
   if (ok) return true;
 
   console.log("⚠️ reply 失敗，改用 push 補發");
-  return await safePush(pushTarget, text);
+  return await safePush(pushTarget, text, sender);
 }
 
 /* =========================
@@ -733,7 +899,9 @@ function buildHelpText(isOwnerUser = false) {
 /groupid
 /mystyle
 /debuglang
-/dict list`;
+/dict list
+
+這版會自動依發話者切換頭像`;
 
   if (isOwnerUser) {
     msg += `
@@ -752,7 +920,10 @@ function buildHelpText(isOwnerUser = false) {
 /style feminine
 /style masculine
 /dict add 原文 => 翻譯
-/dict del 原文`;
+/dict del 原文
+/gdict list
+/gdict add 原文 => 翻譯
+/gdict del 原文`;
   }
 
   return msg;
@@ -764,6 +935,8 @@ function buildHelpText(isOwnerUser = false) {
 
 async function handleJoin(event) {
   const id = safeGetId(event);
+  const sender = await fetchLineProfile(event);
+
   console.log("👥 join event, id:", id);
 
   if (!isAllowed(id)) {
@@ -774,12 +947,13 @@ async function handleJoin(event) {
 
 請管理員輸入：
 
-/approve`
+/approve`,
+      sender
     );
     return;
   }
 
-  await smartReply(event, "✅ 此群組已授權");
+  await smartReply(event, "✅ 此群組已授權", sender);
 }
 
 async function handleTextMessage(event) {
@@ -793,66 +967,61 @@ async function handleTextMessage(event) {
   console.log("🆔 id:", id);
   console.log("🎨 style:", style);
 
-  if (shouldIgnoreText(text)) {
-    console.log("⚠️ 純符號/emoji，略過翻譯");
-    return;
-  }
-
-  if (isDuplicateMessage(id, text)) {
-    console.log("⚠️ 短時間重複訊息，略過");
-    return;
-  }
+  if (shouldIgnoreText(text)) return;
+  if (isDuplicateMessage(id, text)) return;
 
   if (!enterInflight(id)) {
-    console.log("⚠️ 同聊天室同時處理過多，略過本次");
-    await smartReply(event, "⚠️ 訊息較多，請稍後再試");
+    const busySender = await fetchLineProfile(event);
+    await smartReply(event, "⚠️ 訊息較多，請稍後再試", busySender);
     return;
   }
 
   try {
+    const sender = await fetchLineProfile(event);
+
     if (text === "/help") {
-      await smartReply(event, buildHelpText(isOwner(event)));
+      await smartReply(event, buildHelpText(isOwner(event)), sender);
       return;
     }
 
     if (text === "/myid") {
-      await smartReply(event, event?.source?.userId || "查不到 userId");
+      await smartReply(event, event?.source?.userId || "查不到 userId", sender);
       return;
     }
 
     if (text === "/groupid") {
-      await smartReply(event, isGroupOrRoom(event) ? id : "這不是群組或聊天室");
+      await smartReply(event, isGroupOrRoom(event) ? id : "這不是群組或聊天室", sender);
       return;
     }
 
     if (text === "/mystyle") {
       if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用");
+        await smartReply(event, "請在群組或聊天室使用", sender);
         return;
       }
-      await smartReply(event, `目前翻譯風格：${getStyle(id)}`);
+      await smartReply(event, `目前翻譯風格：${getStyle(id)}`, sender);
       return;
     }
 
     if (text === "/debuglang") {
       const lang = detectLang(text);
-      await smartReply(event, `語言判斷測試用指令本身：${lang}`);
+      await smartReply(event, `語言判斷測試用指令本身：${lang}`, sender);
       return;
     }
 
     if (text.startsWith("/debuglang ")) {
       const raw = text.replace("/debuglang ", "").trim();
       const lang = detectLang(raw);
-      await smartReply(event, `判斷結果：${lang}`);
+      await smartReply(event, `判斷結果：${lang}`, sender);
       return;
     }
 
     if (text === "/dict list") {
       if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用");
+        await smartReply(event, "請在群組或聊天室使用", sender);
         return;
       }
-      await smartReply(event, buildDictList(id));
+      await smartReply(event, buildDictList(id), sender);
       return;
     }
 
@@ -860,31 +1029,31 @@ async function handleTextMessage(event) {
       if (text === "/pending") {
         ensureDBShape();
         if (!db.pending.length) {
-          await smartReply(event, "沒有待授權群組");
+          await smartReply(event, "沒有待授權群組", sender);
           return;
         }
-        await smartReply(event, `待授權群組：\n\n${db.pending.join("\n")}`);
+        await smartReply(event, `待授權群組：\n\n${db.pending.join("\n")}`, sender);
         return;
       }
 
       if (text === "/approve") {
         if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用");
+          await smartReply(event, "請在群組或聊天室使用", sender);
           return;
         }
         approveGroup(id);
-        await smartReply(event, "✅ 群組授權成功");
+        await smartReply(event, "✅ 群組授權成功", sender);
         return;
       }
 
       if (text === "/reject") {
         if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用");
+          await smartReply(event, "請在群組或聊天室使用", sender);
           return;
         }
 
         rejectGroup(id);
-        const ok = await smartReply(event, "❌ 已拒絕並退出");
+        const ok = await smartReply(event, "❌ 已拒絕並退出", sender);
 
         if (ok) {
           try {
@@ -902,7 +1071,7 @@ async function handleTextMessage(event) {
 
       if (text.startsWith("/style ")) {
         if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用");
+          await smartReply(event, "請在群組或聊天室使用", sender);
           return;
         }
 
@@ -921,19 +1090,20 @@ async function handleTextMessage(event) {
         if (!allowedStyles.includes(nextStyle)) {
           await smartReply(
             event,
-            "可用風格：\nauto\nprecise\ncasual\nromance\nnightlife\nwork\nfeminine\nmasculine"
+            "可用風格：\nauto\nprecise\ncasual\nromance\nnightlife\nwork\nfeminine\nmasculine",
+            sender
           );
           return;
         }
 
         setStyle(id, nextStyle);
-        await smartReply(event, `✅ 已切換翻譯風格：${nextStyle}`);
+        await smartReply(event, `✅ 已切換翻譯風格：${nextStyle}`, sender);
         return;
       }
 
       if (text.startsWith("/dict add ")) {
         if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用");
+          await smartReply(event, "請在群組或聊天室使用", sender);
           return;
         }
 
@@ -941,7 +1111,7 @@ async function handleTextMessage(event) {
         const parts = raw.split("=>");
 
         if (parts.length < 2) {
-          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯");
+          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯", sender);
           return;
         }
 
@@ -949,70 +1119,145 @@ async function handleTextMessage(event) {
         const target = parts.slice(1).join("=>").trim();
 
         if (!source || !target) {
-          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯");
+          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯", sender);
           return;
         }
 
         const ok = setDict(id, source, target);
         await smartReply(
           event,
-          ok ? `✅ 已加入詞典\n${source} => ${target}` : "⚠️ 加入詞典失敗"
+          ok ? `✅ 已加入群組詞典\n${source} => ${target}` : "⚠️ 加入群組詞典失敗",
+          sender
         );
         return;
       }
 
       if (text.startsWith("/dict del ")) {
         if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用");
+          await smartReply(event, "請在群組或聊天室使用", sender);
           return;
         }
 
         const source = text.replace("/dict del ", "").trim();
 
         if (!source) {
-          await smartReply(event, "格式錯誤\n請使用：/dict del 原文");
+          await smartReply(event, "格式錯誤\n請使用：/dict del 原文", sender);
           return;
         }
 
         const ok = deleteDict(id, source);
-        await smartReply(event, ok ? `✅ 已刪除：${source}` : "⚠️ 找不到這筆詞典");
+        await smartReply(
+          event,
+          ok ? `✅ 已刪除群組詞典：${source}` : "⚠️ 找不到這筆群組詞典",
+          sender
+        );
+        return;
+      }
+
+      if (text === "/gdict list") {
+        await smartReply(event, buildGlobalDictList(), sender);
+        return;
+      }
+
+      if (text.startsWith("/gdict add ")) {
+        const raw = text.replace("/gdict add ", "").trim();
+        const parts = raw.split("=>");
+
+        if (parts.length < 2) {
+          await smartReply(event, "格式錯誤\n請使用：/gdict add 原文 => 翻譯", sender);
+          return;
+        }
+
+        const source = parts[0].trim();
+        const target = parts.slice(1).join("=>").trim();
+
+        if (!source || !target) {
+          await smartReply(event, "格式錯誤\n請使用：/gdict add 原文 => 翻譯", sender);
+          return;
+        }
+
+        const ok = setGlobalDict(source, target);
+        await smartReply(
+          event,
+          ok ? `✅ 已加入全域詞典\n${source} => ${target}` : "⚠️ 加入全域詞典失敗",
+          sender
+        );
+        return;
+      }
+
+      if (text.startsWith("/gdict del ")) {
+        const source = text.replace("/gdict del ", "").trim();
+
+        if (!source) {
+          await smartReply(event, "格式錯誤\n請使用：/gdict del 原文", sender);
+          return;
+        }
+
+        const ok = deleteGlobalDict(source);
+        await smartReply(
+          event,
+          ok ? `✅ 已刪除全域詞典：${source}` : "⚠️ 找不到這筆全域詞典",
+          sender
+        );
         return;
       }
     }
 
     if (isGroupOrRoom(event) && !isAllowed(id)) {
-      await smartReply(event, "⛔ 此群組尚未授權");
+      await smartReply(event, "⛔ 此群組尚未授權", sender);
       return;
     }
 
-    if (text.startsWith("/")) {
-      console.log("⚠️ 未知指令，略過翻譯:", text);
-      return;
-    }
+    if (text.startsWith("/")) return;
 
-    const dict = getDict(id);
     const normalizedText = normalizeDictKey(text);
 
-    if (dict[normalizedText]) {
-      console.log("📚 命中自訂詞典");
-      await smartReply(event, dict[normalizedText]);
+    // 短句強制翻譯；長句才做混合內容略過判斷
+    if (!shouldForceTranslate(text)) {
+      if (isMixedZhTh(text)) {
+        console.log("⚠️ 中泰混合內容，略過翻譯");
+        return;
+      }
+
+      if (isLikelyBilingualBlock(text)) {
+        console.log("⚠️ 偵測到雙語對照內容，略過翻譯");
+        return;
+      }
+    }
+
+    // 1. 群組詞典
+    const groupDict = getDict(id);
+    if (groupDict[normalizedText]) {
+      await smartReply(event, groupDict[normalizedText], sender);
+      return;
+    }
+
+    // 2. 全域詞典
+    const globalDict = getGlobalDict();
+    if (globalDict[normalizedText]) {
+      await smartReply(event, globalDict[normalizedText], sender);
       return;
     }
 
     const lang = detectLang(text);
 
-    const protectedResult = protectedPhraseTranslate(text, lang);
-    if (protectedResult) {
-      console.log("🛡️ 命中高風險片語保護");
-      await smartReply(event, protectedResult);
+    if (lang === "mixed" && !shouldForceTranslate(text)) {
+      console.log("⚠️ mixed 語言內容，略過翻譯");
       return;
     }
 
+    // 3. 高風險片語保護
+    const protectedResult = protectedPhraseTranslate(text, lang);
+    if (protectedResult) {
+      await smartReply(event, protectedResult, sender);
+      return;
+    }
+
+    // 4. 快翻
     if (lang === "th") {
       const fast = thaiFast(text);
       if (fast) {
-        console.log("⚡ 命中泰文快翻");
-        await smartReply(event, fast);
+        await smartReply(event, fast, sender);
         return;
       }
     }
@@ -1020,25 +1265,20 @@ async function handleTextMessage(event) {
     if (lang === "zh") {
       const fast = zhFast(text);
       if (fast) {
-        console.log("⚡ 命中中文快翻");
-        await smartReply(event, fast);
+        await smartReply(event, fast, sender);
         return;
       }
     }
 
+    // 5. OpenAI
     const target = getTargetLanguage(lang);
-
-    console.log("🧠 準備送 OpenAI，語言:", lang, "目標語言:", target);
-
     let result = await translate(text, target, style);
 
     if (!result) {
-      console.log("⚠️ OpenAI 最終失敗，使用 fallback");
       result = fallbackMessage(lang);
     }
 
-    console.log("📤 準備回覆:", result);
-    await smartReply(event, result);
+    await smartReply(event, result, sender);
   } finally {
     leaveInflight(id);
   }
@@ -1046,15 +1286,7 @@ async function handleTextMessage(event) {
 
 async function handleEvent(event) {
   try {
-    if (!event) {
-      console.log("⚠️ event 不存在");
-      return;
-    }
-
-    if (!event.source) {
-      console.log("⚠️ event.source 不存在");
-      return;
-    }
+    if (!event || !event.source) return;
 
     if (event.type === "join") {
       await handleJoin(event);
@@ -1069,7 +1301,8 @@ async function handleEvent(event) {
     console.error("❌ handleEvent 爆掉:", e?.message || e);
 
     try {
-      await smartReply(event, "⚠️ 系統忙碌中，請再試一次");
+      const sender = await fetchLineProfile(event);
+      await smartReply(event, "⚠️ 系統忙碌中，請再試一次", sender);
     } catch (err) {
       console.error("❌ smartReply 失敗:", err?.message || err);
     }
@@ -1087,9 +1320,10 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.2",
+    version: "4.6.6",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
+    profileCacheSize: profileCache.size,
     inflightChats: inflightByChat.size,
     dbLoaded: !!db,
   });
@@ -1122,5 +1356,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.2 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.6 RUNNING ON PORT ${PORT}`);
 });
