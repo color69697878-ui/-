@@ -352,7 +352,7 @@ function buildRecentContextText(event, limit = 3) {
 }
 
 /* =========================
-   更強的防重複回覆
+   防重複回覆（修正版）
 ========================= */
 
 const processedEventKeys = new Map();
@@ -367,34 +367,31 @@ function cleanupProcessedKeys() {
   }
 }
 
-function collectPossibleEventKeys(event, text) {
+function collectPossibleEventKeys(event) {
   const keys = [];
-  const conversationKey = getConversationKey(event);
 
   if (event.message?.id) keys.push(`mid:${event.message.id}`);
   if (event.webhookEventId) keys.push(`wid:${event.webhookEventId}`);
-  if (event.replyToken) keys.push(`rt:${event.replyToken}`);
 
-  keys.push(`fallback:${conversationKey}:${event.source.userId || "unknown"}:${text}`);
   return keys;
 }
 
-function hasRecentlyProcessed(event, text) {
+function isRecentlyProcessed(event) {
   cleanupProcessedKeys();
 
-  const keys = collectPossibleEventKeys(event, text);
-  for (const key of keys) {
-    if (processedEventKeys.has(key)) {
-      return true;
-    }
-  }
+  const keys = collectPossibleEventKeys(event);
+  if (!keys.length) return false;
 
+  return keys.some(key => processedEventKeys.has(key));
+}
+
+function markEventProcessed(event) {
   const now = Date.now();
+  const keys = collectPossibleEventKeys(event);
+
   for (const key of keys) {
     processedEventKeys.set(key, now);
   }
-
-  return false;
 }
 
 /* =========================
@@ -408,6 +405,15 @@ function getProfileCacheKey(event) {
   const userId = event.source.userId;
   if (!userId) return null;
   return `${event.source.type}:${userId}:${event.source.groupId || ""}:${event.source.roomId || ""}`;
+}
+
+function extractErrorDetail(err) {
+  return (
+    err?.originalError?.response?.data ||
+    err?.response?.data ||
+    err?.message ||
+    err
+  );
 }
 
 async function getSenderProfile(event) {
@@ -459,15 +465,6 @@ function isGroupOrRoom(event) {
   return event.source.type === "group" || event.source.type === "room";
 }
 
-function extractErrorDetail(err) {
-  return (
-    err?.originalError?.response?.data ||
-    err?.response?.data ||
-    err?.message ||
-    err
-  );
-}
-
 function sanitizeSenderName(name = "") {
   return name
     .replace(/[\p{Extended_Pictographic}]/gu, "")
@@ -507,20 +504,35 @@ async function reply(event, text, senderProfile = null) {
       message.sender = sender;
     }
 
-    return await client.replyMessage(event.replyToken, message);
+    await client.replyMessage(event.replyToken, message);
+    return true;
   } catch (err) {
     console.error("⚠️ 帶 sender 回覆失敗，改用純文字重送:", extractErrorDetail(err));
 
     try {
-      return await client.replyMessage(event.replyToken, {
+      await client.replyMessage(event.replyToken, {
         type: "text",
         text
       });
+      return true;
     } catch (err2) {
       console.error("❌ 純文字回覆也失敗:", extractErrorDetail(err2));
-      return;
+      return false;
     }
   }
+}
+
+async function safeReplyAndMark(event, text, senderProfile = null, originalTextForContext = null) {
+  const ok = await reply(event, text, senderProfile);
+
+  if (ok) {
+    if (originalTextForContext) {
+      pushRecentMessage(event, originalTextForContext);
+    }
+    markEventProcessed(event);
+  }
+
+  return ok;
 }
 
 /* =========================
@@ -1097,8 +1109,7 @@ async function handleEvent(event) {
 
       if (!isAllowed(id)) {
         addPending(id);
-
-        return reply(
+        await safeReplyAndMark(
           event,
           `🔐 此群組尚未授權
 
@@ -1106,10 +1117,12 @@ async function handleEvent(event) {
 
 /approve`
         );
+        return;
       }
 
       ensureGroupDefaults(id);
-      return reply(event, "✅ 此群組已授權");
+      await safeReplyAndMark(event, "✅ 此群組已授權");
+      return;
     }
 
     if (event.type !== "message") return;
@@ -1123,7 +1136,7 @@ async function handleEvent(event) {
 
     if (!text) return;
 
-    if (hasRecentlyProcessed(event, text)) {
+    if (isRecentlyProcessed(event)) {
       console.log("♻️ 偵測到重複事件，略過:", text);
       return;
     }
@@ -1131,25 +1144,31 @@ async function handleEvent(event) {
     /* 指令優先 */
 
     if (text === "/myid") {
-      return reply(event, userId || "查不到 userId");
+      await safeReplyAndMark(event, userId || "查不到 userId");
+      return;
     }
 
     if (text === "/groupid") {
-      return reply(event, id || "這不是群組或聊天室");
+      await safeReplyAndMark(event, id || "這不是群組或聊天室");
+      return;
     }
 
     if (text === "/mystyle") {
       if (!isGroupOrRoom(event)) {
-        return reply(event, "請在群組或聊天室使用");
+        await safeReplyAndMark(event, "請在群組或聊天室使用");
+        return;
       }
-      return reply(event, `目前翻譯風格：${getStyle(id)}`);
+      await safeReplyAndMark(event, `目前翻譯風格：${getStyle(id)}`);
+      return;
     }
 
     if (text === "/dict list") {
       if (!isGroupOrRoom(event)) {
-        return reply(event, "請在群組或聊天室使用");
+        await safeReplyAndMark(event, "請在群組或聊天室使用");
+        return;
       }
-      return reply(event, buildDictListText(id));
+      await safeReplyAndMark(event, buildDictListText(id));
+      return;
     }
 
     /* OWNER 管理指令 */
@@ -1157,45 +1176,51 @@ async function handleEvent(event) {
     if (userId === OWNER) {
       if (text === "/pending") {
         if (groupDB.pending.length === 0) {
-          return reply(event, "沒有待授權群組");
+          await safeReplyAndMark(event, "沒有待授權群組");
+          return;
         }
 
-        return reply(
+        await safeReplyAndMark(
           event,
           "待授權群組：\n\n" + groupDB.pending.join("\n")
         );
+        return;
       }
 
       if (text === "/approve") {
         if (!isGroupOrRoom(event)) {
-          return reply(event, "請在群組或聊天室使用");
+          await safeReplyAndMark(event, "請在群組或聊天室使用");
+          return;
         }
 
         approveGroup(id);
-        return reply(event, "✅ 群組授權成功");
+        await safeReplyAndMark(event, "✅ 群組授權成功");
+        return;
       }
 
       if (text === "/reject") {
         if (!isGroupOrRoom(event)) {
-          return reply(event, "請在群組或聊天室使用");
+          await safeReplyAndMark(event, "請在群組或聊天室使用");
+          return;
         }
 
         rejectGroup(id);
 
-        await reply(event, "❌ 已拒絕並退出");
-
-        if (event.source.type === "group") {
-          await client.leaveGroup(id);
-        } else if (event.source.type === "room") {
-          await client.leaveRoom(id);
+        const ok = await safeReplyAndMark(event, "❌ 已拒絕並退出");
+        if (ok) {
+          if (event.source.type === "group") {
+            await client.leaveGroup(id);
+          } else if (event.source.type === "room") {
+            await client.leaveRoom(id);
+          }
         }
-
         return;
       }
 
       if (text.startsWith("/style ")) {
         if (!isGroupOrRoom(event)) {
-          return reply(event, "請在群組或聊天室使用");
+          await safeReplyAndMark(event, "請在群組或聊天室使用");
+          return;
         }
 
         const style = text.replace("/style ", "").trim();
@@ -1211,64 +1236,75 @@ async function handleEvent(event) {
         ];
 
         if (!allowedStyles.includes(style)) {
-          return reply(
+          await safeReplyAndMark(
             event,
             "可用風格：\nauto\nprecise\ncasual\nromance\nnightlife\nwork\nfeminine\nmasculine"
           );
+          return;
         }
 
         setStyle(id, style);
-        return reply(event, `✅ 已切換翻譯風格：${style}`);
+        await safeReplyAndMark(event, `✅ 已切換翻譯風格：${style}`);
+        return;
       }
 
       if (text.startsWith("/dict add ")) {
         if (!isGroupOrRoom(event)) {
-          return reply(event, "請在群組或聊天室使用");
+          await safeReplyAndMark(event, "請在群組或聊天室使用");
+          return;
         }
 
         const raw = text.replace("/dict add ", "").trim();
         const parts = raw.split("=>");
 
         if (parts.length < 2) {
-          return reply(event, "格式錯誤\n\n請使用：\n/dict add 原文 => 翻譯");
+          await safeReplyAndMark(event, "格式錯誤\n\n請使用：\n/dict add 原文 => 翻譯");
+          return;
         }
 
         const sourceText = parts[0].trim();
         const targetText = parts.slice(1).join("=>").trim();
 
         if (!sourceText || !targetText) {
-          return reply(event, "格式錯誤\n\n請使用：\n/dict add 原文 => 翻譯");
+          await safeReplyAndMark(event, "格式錯誤\n\n請使用：\n/dict add 原文 => 翻譯");
+          return;
         }
 
         setGroupDictEntry(id, sourceText, targetText);
-        return reply(event, `✅ 已加入自訂詞典\n${sourceText} => ${targetText}`);
+        await safeReplyAndMark(event, `✅ 已加入自訂詞典\n${sourceText} => ${targetText}`);
+        return;
       }
 
       if (text.startsWith("/dict del ")) {
         if (!isGroupOrRoom(event)) {
-          return reply(event, "請在群組或聊天室使用");
+          await safeReplyAndMark(event, "請在群組或聊天室使用");
+          return;
         }
 
         const sourceText = text.replace("/dict del ", "").trim();
 
         if (!sourceText) {
-          return reply(event, "格式錯誤\n\n請使用：\n/dict del 原文");
+          await safeReplyAndMark(event, "格式錯誤\n\n請使用：\n/dict del 原文");
+          return;
         }
 
         const deleted = deleteGroupDictEntry(id, sourceText);
 
         if (!deleted) {
-          return reply(event, "⚠️ 找不到這筆自訂詞典");
+          await safeReplyAndMark(event, "⚠️ 找不到這筆自訂詞典");
+          return;
         }
 
-        return reply(event, `✅ 已刪除自訂詞典：${sourceText}`);
+        await safeReplyAndMark(event, `✅ 已刪除自訂詞典：${sourceText}`);
+        return;
       }
     }
 
     /* 未授權群組限制 */
 
     if (isGroupOrRoom(event) && !isAllowed(id)) {
-      return reply(event, "⛔ 此群組尚未授權");
+      await safeReplyAndMark(event, "⛔ 此群組尚未授權");
+      return;
     }
 
     if (isGroupOrRoom(event)) {
@@ -1318,8 +1354,8 @@ async function handleEvent(event) {
       if (customDictHit) {
         const senderProfile = await getSenderProfile(event);
         const finalCustomResult = code ? `${code} ${customDictHit}` : customDictHit;
-        pushRecentMessage(event, text);
-        return reply(event, finalCustomResult, senderProfile);
+        await safeReplyAndMark(event, finalCustomResult, senderProfile, text);
+        return;
       }
     }
 
@@ -1331,8 +1367,8 @@ async function handleEvent(event) {
       if (fastZhWord) {
         const senderProfile = await getSenderProfile(event);
         const finalFastResult = code ? `${code} ${fastZhWord}` : fastZhWord;
-        pushRecentMessage(event, text);
-        return reply(event, finalFastResult, senderProfile);
+        await safeReplyAndMark(event, finalFastResult, senderProfile, text);
+        return;
       }
     }
 
@@ -1344,8 +1380,8 @@ async function handleEvent(event) {
       if (fastThaiWord) {
         const senderProfile = await getSenderProfile(event);
         const finalFastResult = code ? `${code} ${fastThaiWord}` : fastThaiWord;
-        pushRecentMessage(event, text);
-        return reply(event, finalFastResult, senderProfile);
+        await safeReplyAndMark(event, finalFastResult, senderProfile, text);
+        return;
       }
     }
 
@@ -1364,8 +1400,9 @@ async function handleEvent(event) {
         const finalFastResult = code
           ? fastEnWord.split("\n").map(line => `${code} ${line}`).join("\n")
           : fastEnWord;
-        pushRecentMessage(event, text);
-        return reply(event, finalFastResult, senderProfile);
+
+        await safeReplyAndMark(event, finalFastResult, senderProfile, text);
+        return;
       }
     }
 
@@ -1392,9 +1429,7 @@ async function handleEvent(event) {
 
     const senderProfile = await getSenderProfile(event);
 
-    pushRecentMessage(event, text);
-    return reply(event, finalResult, senderProfile);
-
+    await safeReplyAndMark(event, finalResult, senderProfile, text);
   } catch (err) {
     console.error("❌ HANDLE EVENT ERROR:", extractErrorDetail(err));
     return;
