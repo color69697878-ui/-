@@ -28,39 +28,22 @@ const openai = new OpenAI({
 });
 
 /* =========================
-   設定
-========================= */
-
-const OWNER = process.env.OWNER_USER_ID;
-
-/* =========================
-   v3 自動學習
-========================= */
-
-const AUTO_LEARN_ENABLED = true;
-
-/* =========================
    DB
 ========================= */
 
-const GROUP_DB_FILE = "./groups.json";
+const DB_FILE = "./groups.json";
 
-function loadJSON(file, fallback) {
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, JSON.stringify(fallback, null, 2));
-    return fallback;
+function loadDB() {
+  if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(DB_FILE, JSON.stringify({ dicts: {} }, null, 2));
   }
-  return JSON.parse(fs.readFileSync(file));
+  return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
-let groupDB = loadJSON(GROUP_DB_FILE, {
-  allowed: [],
-  styles: {},
-  dicts: {}
-});
+let db = loadDB();
 
 function saveDB() {
-  fs.writeFileSync(GROUP_DB_FILE, JSON.stringify(groupDB, null, 2));
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
 /* =========================
@@ -68,7 +51,11 @@ function saveDB() {
 ========================= */
 
 function getId(event) {
-  return event.source.groupId || event.source.roomId || null;
+  return (
+    event.source.groupId ||
+    event.source.roomId ||
+    event.source.userId
+  );
 }
 
 function isGroup(event) {
@@ -80,33 +67,25 @@ function isGroup(event) {
 ========================= */
 
 function getDict(id) {
-  if (!groupDB.dicts[id]) groupDB.dicts[id] = {};
-  return groupDB.dicts[id];
-}
-
-function setDict(id, k, v) {
-  getDict(id)[k] = v;
-  saveDB();
+  if (!db.dicts[id]) db.dicts[id] = {};
+  return db.dicts[id];
 }
 
 /* =========================
-   語境記憶 v4
+   記憶（v4）
 ========================= */
 
 const memory = new Map();
 
-function pushMemory(event, text) {
-  const key = getId(event) || event.source.userId;
-  if (!memory.has(key)) memory.set(key, []);
-  const arr = memory.get(key);
+function pushMemory(id, text) {
+  if (!memory.has(id)) memory.set(id, []);
+  const arr = memory.get(id);
   arr.push(text);
   if (arr.length > 5) arr.shift();
 }
 
-function getContext(event) {
-  const key = getId(event) || event.source.userId;
-  const arr = memory.get(key) || [];
-
+function getContext(id) {
+  const arr = memory.get(id) || [];
   const last = arr[arr.length - 1] || "";
 
   return {
@@ -128,90 +107,75 @@ function detectLang(text) {
 }
 
 /* =========================
-   v4 泰文短詞
+   v4 泰文快翻
 ========================= */
 
 function thaiFast(text, ctx) {
   const t = text.trim();
 
-  if (["ยัง"].includes(t)) {
-    return ctx.isQuestion ? "還沒" : "還";
-  }
-
+  if (t === "ยัง") return ctx.isQuestion ? "還沒" : "還";
   if (["ค่ะ","ครับ"].includes(t)) {
     if (ctx.isConfirm) return "對";
     if (ctx.isQuestion) return "可以";
     return "好";
   }
-
-  if (["ไปค่ะ","ไปครับ","ไป"].includes(t)) {
-    return ctx.isAction ? "會去" : "去";
-  }
-
-  if (["มา"].includes(t)) {
-    return ctx.isAction ? "會來" : "來";
-  }
-
-  if (["ได้"].includes(t)) {
-    return "可以";
-  }
+  if (t.includes("ไป")) return ctx.isAction ? "會去" : "去";
+  if (t.includes("มา")) return ctx.isAction ? "會來" : "來";
+  if (t === "ได้") return "可以";
 
   return "";
 }
 
 /* =========================
-   v3 自動學習
+   fallback 翻譯
 ========================= */
 
-function autoLearn(id, src, result) {
-  if (!AUTO_LEARN_ENABLED) return;
-  if (!src || !result) return;
-
-  const dict = getDict(id);
-  if (dict[src]) return;
-
-  if (src.length < 4) return;
-
-  dict[src] = result;
-  saveDB();
-
-  console.log("🧠 學習:", src, "=>", result);
+function fallbackTranslate(text, lang) {
+  if (lang === "zh") return "（泰文翻譯暫時不可用）";
+  if (lang === "th") return "（中文翻譯暫時不可用）";
+  return "（翻譯暫時不可用）";
 }
 
 /* =========================
-   翻譯
+   OpenAI 翻譯（含 retry）
 ========================= */
 
 async function translate(text, target) {
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: "只輸出翻譯"
-      },
-      {
-        role: "user",
-        content: `翻譯成${target}：${text}`
-      }
-    ]
-  });
+  for (let i = 0; i < 2; i++) {
+    try {
+      const r = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        timeout: 15000,
+        messages: [
+          { role: "system", content: "只輸出翻譯結果" },
+          { role: "user", content: `翻譯成${target}：${text}` }
+        ]
+      });
 
-  return r.choices[0].message.content.trim();
+      return r.choices[0].message.content.trim();
+
+    } catch (err) {
+      console.error("❌ OpenAI error:", err.message);
+      if (i === 1) return null;
+    }
+  }
 }
 
 /* =========================
-   回覆
+   reply（含 retry）
 ========================= */
 
-async function reply(event, text) {
-  try {
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text
-    });
-  } catch {
-    console.log("reply fail");
+async function safeReply(token, text) {
+  for (let i = 0; i < 2; i++) {
+    try {
+      await client.replyMessage(token, {
+        type: "text",
+        text
+      });
+      return;
+    } catch (err) {
+      console.error("❌ reply error:", err.message);
+    }
   }
 }
 
@@ -220,55 +184,73 @@ async function reply(event, text) {
 ========================= */
 
 async function handleEvent(event) {
+  try {
+    if (event.type !== "message") return;
+    if (event.message.type !== "text") return;
 
-  if (event.type !== "message") return;
-  if (event.message.type !== "text") return;
+    const text = event.message.text.trim();
+    const id = getId(event);
 
-  const text = event.message.text.trim();
-  const id = getId(event);
+    if (!text) return;
 
-  const ctx = getContext(event);
+    const ctx = getContext(id);
 
-  /* 詞典優先 */
-  const dict = getDict(id);
-  if (dict[text]) {
-    await reply(event, dict[text]);
-    pushMemory(event, text);
-    return;
-  }
-
-  /* v4 快翻 */
-  if (detectLang(text) === "th") {
-    const fast = thaiFast(text, ctx);
-    if (fast) {
-      await reply(event, fast);
-      pushMemory(event, text);
+    /* 詞典 */
+    const dict = getDict(id);
+    if (dict[text]) {
+      await safeReply(event.replyToken, dict[text]);
+      pushMemory(id, text);
       return;
     }
+
+    /* 快翻 */
+    if (detectLang(text) === "th") {
+      const fast = thaiFast(text, ctx);
+      if (fast) {
+        await safeReply(event.replyToken, fast);
+        pushMemory(id, text);
+        return;
+      }
+    }
+
+    /* AI */
+    const lang = detectLang(text);
+    const target = lang === "zh" ? "泰文" : "中文";
+
+    let result = await translate(text, target);
+
+    if (!result) {
+      result = fallbackTranslate(text, lang);
+    }
+
+    await safeReply(event.replyToken, result);
+
+    pushMemory(id, text);
+
+  } catch (err) {
+    console.error("❌ handleEvent error:", err);
   }
-
-  /* AI 翻譯 */
-  const lang = detectLang(text);
-  const target = lang === "zh" ? "泰文" : "中文";
-
-  const result = await translate(text, target);
-
-  await reply(event, result);
-
-  /* v3 學習 */
-  if (isGroup(event)) {
-    autoLearn(id, text, result);
-  }
-
-  pushMemory(event, text);
 }
 
 /* =========================
-   webhook
+   webhook（穩定版）
 ========================= */
 
-app.post("/webhook", line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent));
+app.post("/webhook", line.middleware(config), async (req, res) => {
+  try {
+    await Promise.all(
+      req.body.events.map(async (event) => {
+        try {
+          await handleEvent(event);
+        } catch (err) {
+          console.error("❌ event error:", err);
+        }
+      })
+    );
+  } catch (err) {
+    console.error("❌ webhook error:", err);
+  }
+
   res.sendStatus(200);
 });
 
@@ -277,5 +259,5 @@ app.post("/webhook", line.middleware(config), (req, res) => {
 ========================= */
 
 app.listen(3000, () => {
-  console.log("🚀 BOT RUNNING v4");
+  console.log("🚀 BOT RUNNING v4.1 STABLE");
 });
