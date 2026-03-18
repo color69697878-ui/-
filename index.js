@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.6 START");
+console.log("🚀 BOT v4.6.7 START");
 
 /* =========================
    ENV CHECK
@@ -491,10 +491,6 @@ function getTargetLanguage(lang) {
   return "繁體中文";
 }
 
-function isMixedZhTh(text = "") {
-  return hasThai(text) && hasChinese(text);
-}
-
 function isLikelyBilingualBlock(text = "") {
   const lines = String(text)
     .split("\n")
@@ -512,10 +508,6 @@ function isLikelyBilingualBlock(text = "") {
   }
 
   return hasZhLine && hasThLine;
-}
-
-function isShortText(text = "") {
-  return String(text || "").trim().length <= 6;
 }
 
 function shouldForceTranslate(text = "") {
@@ -699,6 +691,37 @@ function zhFast(text) {
     "是": "ใช่",
     "好": "โอเค",
     "好的": "โอเค",
+
+    "剛剛": "เมื่อกี้",
+    "刚刚": "เมื่อกี้",
+    "現在": "ตอนนี้",
+    "现在": "ตอนนี้",
+    "等一下": "รอสักครู่",
+    "等一下喔": "รอสักครู่นะ",
+    "為什麼": "ทำไม",
+    "为什么": "ทำไม",
+    "是不是現在": "ตอนนี้ใช่ไหม",
+    "是不是现在": "ตอนนี้ใช่ไหม",
+    "剛才": "เมื่อกี้",
+    "刚才": "เมื่อกี้",
+    "剛才問你": "เมื่อกี้ฉันถามคุณ",
+    "刚才问你": "เมื่อกี้ฉันถามคุณ",
+    "剛才問你是不是現在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม",
+    "刚才问你是不是现在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม"
+  };
+
+  return dict[t] || "";
+}
+
+function enFast(text) {
+  const t = text.trim().toLowerCase();
+
+  const dict = {
+    "now": "現在",
+    "why": "為什麼",
+    "ok": "好",
+    "wait": "等一下",
+    "just now": "剛剛"
   };
 
   return dict[t] || "";
@@ -809,6 +832,35 @@ async function translate(text, target, style = "auto") {
 
       if (result) {
         const clean = safeText(result);
+
+        if (clean === text.trim() && text.trim().length <= 6) {
+          const lang = detectLang(text);
+
+          if (lang === "zh") {
+            const fast = zhFast(text);
+            if (fast) {
+              setCachedTranslation(cacheKey, fast);
+              return fast;
+            }
+          }
+
+          if (lang === "th") {
+            const fast = thaiFast(text);
+            if (fast) {
+              setCachedTranslation(cacheKey, fast);
+              return fast;
+            }
+          }
+
+          if (lang === "en") {
+            const fast = enFast(text);
+            if (fast) {
+              setCachedTranslation(cacheKey, fast);
+              return fast;
+            }
+          }
+        }
+
         setCachedTranslation(cacheKey, clean);
         console.log("✅ OpenAI 翻譯成功");
         return clean;
@@ -829,6 +881,75 @@ async function translate(text, target, style = "auto") {
   }
 
   return null;
+}
+
+async function translateMixedLines(text, style = "auto") {
+  const lines = String(text)
+    .split("\n")
+    .map(s => s.trim());
+
+  const out = [];
+
+  for (const line of lines) {
+    if (!line) {
+      out.push("");
+      continue;
+    }
+
+    const lang = detectLang(line);
+
+    if (lang === "zh") {
+      const fast = zhFast(line);
+      if (fast) {
+        out.push(fast);
+        continue;
+      }
+
+      const protectedResult = protectedPhraseTranslate(line, lang);
+      if (protectedResult) {
+        out.push(protectedResult);
+        continue;
+      }
+
+      const result = await translate(line, "泰文", style);
+      out.push(result || line);
+      continue;
+    }
+
+    if (lang === "th") {
+      const fast = thaiFast(line);
+      if (fast) {
+        out.push(fast);
+        continue;
+      }
+
+      const protectedResult = protectedPhraseTranslate(line, lang);
+      if (protectedResult) {
+        out.push(protectedResult);
+        continue;
+      }
+
+      const result = await translate(line, "繁體中文", style);
+      out.push(result || line);
+      continue;
+    }
+
+    if (lang === "en") {
+      const fast = enFast(line);
+      if (fast) {
+        out.push(fast);
+        continue;
+      }
+
+      const result = await translate(line, "繁體中文", style);
+      out.push(result || line);
+      continue;
+    }
+
+    out.push(line);
+  }
+
+  return out.join("\n");
 }
 
 /* =========================
@@ -1212,19 +1333,6 @@ async function handleTextMessage(event) {
 
     const normalizedText = normalizeDictKey(text);
 
-    // 短句強制翻譯；長句才做混合內容略過判斷
-    if (!shouldForceTranslate(text)) {
-      if (isMixedZhTh(text)) {
-        console.log("⚠️ 中泰混合內容，略過翻譯");
-        return;
-      }
-
-      if (isLikelyBilingualBlock(text)) {
-        console.log("⚠️ 偵測到雙語對照內容，略過翻譯");
-        return;
-      }
-    }
-
     // 1. 群組詞典
     const groupDict = getDict(id);
     if (groupDict[normalizedText]) {
@@ -1241,8 +1349,11 @@ async function handleTextMessage(event) {
 
     const lang = detectLang(text);
 
-    if (lang === "mixed" && !shouldForceTranslate(text)) {
-      console.log("⚠️ mixed 語言內容，略過翻譯");
+    // mixed 或雙語區塊一律改成逐行翻譯
+    if (lang === "mixed" || isLikelyBilingualBlock(text)) {
+      console.log("🔀 mixed / 雙語區塊，改為逐行翻譯");
+      const mixedResult = await translateMixedLines(text, style);
+      await smartReply(event, mixedResult, sender);
       return;
     }
 
@@ -1264,6 +1375,14 @@ async function handleTextMessage(event) {
 
     if (lang === "zh") {
       const fast = zhFast(text);
+      if (fast) {
+        await smartReply(event, fast, sender);
+        return;
+      }
+    }
+
+    if (lang === "en") {
+      const fast = enFast(text);
       if (fast) {
         await smartReply(event, fast, sender);
         return;
@@ -1320,7 +1439,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.6",
+    version: "4.6.7",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1356,5 +1475,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.6 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.7 RUNNING ON PORT ${PORT}`);
 });
