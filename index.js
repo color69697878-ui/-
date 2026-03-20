@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.8 START");
+console.log("🚀 BOT v4.6.9 START");
 
 /* =========================
    ENV CHECK
@@ -114,18 +114,18 @@ function saveDB() {
    RUNTIME CACHE
 ========================= */
 
-const translationCache = new Map(); // key -> { value, ts }
-const CACHE_TTL = 1000 * 60 * 10; // 10 分鐘
+const translationCache = new Map();
+const CACHE_TTL = 1000 * 60 * 10;
 const CACHE_MAX = 500;
 
-const recentMessageMap = new Map(); // key -> ts
+const recentMessageMap = new Map();
 const DEDUPE_TTL = 4000;
 
-const inflightByChat = new Map(); // chatId -> count
+const inflightByChat = new Map();
 const MAX_INFLIGHT_PER_CHAT = 2;
 
-const profileCache = new Map(); // key -> { value, ts }
-const PROFILE_TTL = 1000 * 60 * 60 * 12; // 12 小時
+const profileCache = new Map();
+const PROFILE_TTL = 1000 * 60 * 60 * 12;
 const PROFILE_CACHE_MAX = 2000;
 
 function now() {
@@ -274,7 +274,7 @@ function approveGroup(id) {
   if (!id) return false;
   ensureDBShape(id);
 
-  db.pending = db.pending.filter(x => x !== id);
+  db.pending = db.pending.filter((x) => x !== id);
   if (!db.allowed.includes(id)) db.allowed.push(id);
   if (!db.styles[id]) db.styles[id] = "auto";
 
@@ -285,7 +285,7 @@ function approveGroup(id) {
 function rejectGroup(id) {
   if (!id) return false;
   ensureDBShape(id);
-  db.pending = db.pending.filter(x => x !== id);
+  db.pending = db.pending.filter((x) => x !== id);
   saveDB();
   return true;
 }
@@ -380,7 +380,7 @@ function buildGlobalDictList() {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function safeText(text) {
@@ -497,7 +497,7 @@ function getTargetLanguage(lang) {
 function isLikelyBilingualBlock(text = "") {
   const lines = String(text)
     .split("\n")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   if (lines.length < 2) return false;
@@ -968,7 +968,7 @@ async function translate(text, target, style = "auto") {
 async function translateMixedLines(text, style = "auto") {
   const lines = String(text)
     .split("\n")
-    .map(s => s.trim());
+    .map((s) => s.trim());
 
   const out = [];
 
@@ -1106,7 +1106,10 @@ function buildHelpText(isOwnerUser = false) {
 /request
 
 這版會自動依發話者切換頭像
-群組只能申請授權，不能自行啟用`;
+群組只能申請授權，不能自行啟用
+
+如果 OWNER 本人在群組內，可直接：
+/approve`;
 
   if (isOwnerUser) {
     msg += `
@@ -1114,6 +1117,8 @@ function buildHelpText(isOwnerUser = false) {
 管理員指令：
 
 /pending
+/approve
+/reject
 /approve 群組ID
 /reject 群組ID
 /style auto
@@ -1153,7 +1158,8 @@ async function handleJoin(event) {
 請群組成員輸入：
 /request
 
-再由管理員遠端授權`,
+若 OWNER 本人在群組裡，可直接輸入：
+/approve`,
       sender
     );
     return;
@@ -1232,34 +1238,32 @@ async function handleTextMessage(event) {
     }
 
     /* =========================
-       群組授權申請
-    ========================= */
-
-    if (text === "/request") {
-      if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用", sender);
-        return;
-      }
-
-      addPending(id);
-      await smartReply(
-        event,
-        `📨 已送出授權申請
-
-群組ID：
-${id}
-
-請聯絡管理員遠端授權`,
-        sender
-      );
-      return;
-    }
-
-    /* =========================
-       OWNER 遠端授權
+       OWNER 近端 / 遠端授權
     ========================= */
 
     if (isOwner(event)) {
+      if (text === "/approve") {
+        if (!isGroupOrRoom(event)) {
+          await smartReply(event, "請在群組或聊天室使用", sender);
+          return;
+        }
+
+        approveGroup(id);
+        await smartReply(event, "✅ 此群組授權成功", sender);
+        return;
+      }
+
+      if (text === "/reject") {
+        if (!isGroupOrRoom(event)) {
+          await smartReply(event, "請在群組或聊天室使用", sender);
+          return;
+        }
+
+        rejectGroup(id);
+        await smartReply(event, "❌ 已拒絕此群組", sender);
+        return;
+      }
+
       if (text === "/pending") {
         ensureDBShape();
 
@@ -1433,6 +1437,30 @@ ${id}
     }
 
     /* =========================
+       群組授權申請
+    ========================= */
+
+    if (text === "/request") {
+      if (!isGroupOrRoom(event)) {
+        await smartReply(event, "請在群組或聊天室使用", sender);
+        return;
+      }
+
+      addPending(id);
+      await smartReply(
+        event,
+        `📨 已送出授權申請
+
+群組ID：
+${id}
+
+請聯絡管理員遠端授權`,
+        sender
+      );
+      return;
+    }
+
+    /* =========================
        未授權群組
     ========================= */
 
@@ -1441,10 +1469,11 @@ ${id}
         event,
         `⛔ 此群組尚未授權
 
-請先輸入：
+一般成員請輸入：
 /request
 
-由管理員遠端授權後才能翻譯`,
+若 OWNER 本人在群組內，可直接輸入：
+/approve`,
         sender
       );
       return;
@@ -1560,7 +1589,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.8",
+    version: "4.6.9",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1597,5 +1626,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.8 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.9 RUNNING ON PORT ${PORT}`);
 });
