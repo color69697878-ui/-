@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.7 START");
+console.log("🚀 BOT v4.6.8 START");
 
 /* =========================
    ENV CHECK
@@ -16,6 +16,7 @@ const REQUIRED_ENVS = [
   "LINE_CHANNEL_ACCESS_TOKEN",
   "LINE_CHANNEL_SECRET",
   "OPENAI_API_KEY",
+  "OWNER_USER_ID",
 ];
 
 for (const key of REQUIRED_ENVS) {
@@ -270,7 +271,7 @@ function addPending(id) {
 }
 
 function approveGroup(id) {
-  if (!id) return;
+  if (!id) return false;
   ensureDBShape(id);
 
   db.pending = db.pending.filter(x => x !== id);
@@ -278,13 +279,15 @@ function approveGroup(id) {
   if (!db.styles[id]) db.styles[id] = "auto";
 
   saveDB();
+  return true;
 }
 
 function rejectGroup(id) {
-  if (!id) return;
+  if (!id) return false;
   ensureDBShape(id);
   db.pending = db.pending.filter(x => x !== id);
   saveDB();
+  return true;
 }
 
 function getStyle(id) {
@@ -510,14 +513,25 @@ function isLikelyBilingualBlock(text = "") {
   return hasZhLine && hasThLine;
 }
 
-function shouldForceTranslate(text = "") {
+/* =========================
+   場景語意保護 / 電話語境
+========================= */
+
+function normalizeForPhoneContext(text = "") {
   const t = String(text || "").trim();
-  if (!t) return false;
 
-  if (t.length <= 6) return true;
-  if (/[嗎吗呢?？]$/.test(t)) return true;
+  const rules = [
+    [/ก่อนวางสาย/g, "ก่อน挂電話"],
+    [/วางสาย/g, "挂電話"],
+    [/ตัดสาย/g, "挂電話"],
+    [/ก่อนวาง/g, "掛電話前"],
+  ];
 
-  return false;
+  let out = t;
+  for (const [pattern, replacement] of rules) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
 }
 
 /* =========================
@@ -598,6 +612,39 @@ function protectedPhraseTranslate(text, lang) {
         "她在哪裡？",
       "เค้าอยู่ไหน":
         "她在哪裡？",
+
+      "ตอนนี้ฉันยังอยู่เถวหยวนอยู่เลยค่ะ":
+        "我現在還在桃園這邊喔",
+      "ตอนนี้ฉันยังอยู่เถาหยวนอยู่เลยค่ะ":
+        "我現在還在桃園這邊喔",
+      "ตอนนี้ฉันยังอยู่เถาย่วนอยู่เลยค่ะ":
+        "我現在還在桃園這邊喔",
+      "ตอนนี้ฉันยังอยู่แถวเถาหยวนอยู่เลยค่ะ":
+        "我現在還在桃園這邊喔",
+
+      "พรุ่งนี้เข้าไปร้านใหม่":
+        "明天去新的店",
+      "พรุ่งนี้ไปร้านใหม่":
+        "明天去新的店",
+      "พรุ่งนี้เข้าไปที่ร้านใหม่":
+        "明天去新的店",
+      "พรุ่งนี้เช้าไปร้านใหม่":
+        "明天早上去新的店",
+
+      "ฉันบอกคุณก่อนวางตลอด":
+        "我每次掛電話前都會先跟你說",
+      "ฉันบอกคุณก่อนวาง":
+        "我會先跟你說再掛電話",
+      "ก่อนวาง":
+        "掛電話之前",
+      "วางสาย":
+        "掛電話",
+      "ตัดสาย":
+        "掛電話",
+      "ไม่ใช่คุณคิดจะวางก็วาง":
+        "不是你想掛電話就掛",
+      "ไม่ใช่คิดจะวางก็วาง":
+        "不是想掛就掛"
     };
 
     if (thMap[t]) return thMap[t];
@@ -623,6 +670,36 @@ function protectedPhraseTranslate(text, lang) {
         "เธอมาแล้วหรอ",
       "她在哪裡？":
         "เธออยู่ไหน",
+      "我早上沒辦法這麼早起床送你回去":
+        "ตอนเช้าฉันตื่นเช้าขนาดนั้นไม่ไหว เลยไปส่งเธอกลับไม่ได้",
+      "我沒辦法這麼早起床送你回去":
+        "ฉันตื่นเช้าขนาดนั้นไม่ไหว เลยไปส่งเธอกลับไม่ได้",
+      "我早上起不來":
+        "ตอนเช้าฉันตื่นไม่ไหว",
+      "我沒辦法去接你":
+        "ฉันไปรับเธอไม่ได้",
+      "我沒辦法送你回去":
+        "ฉันไปส่งเธอกลับไม่ได้",
+      "剛剛":
+        "เมื่อกี้",
+      "刚刚":
+        "เมื่อกี้",
+      "剛才":
+        "เมื่อกี้",
+      "刚才":
+        "เมื่อกี้",
+      "現在":
+        "ตอนนี้",
+      "现在":
+        "ตอนนี้",
+      "為什麼":
+        "ทำไม",
+      "为什么":
+        "ทำไม",
+      "是不是現在":
+        "ตอนนี้ใช่ไหม",
+      "是不是现在":
+        "ตอนนี้ใช่ไหม"
     };
 
     if (zhMap[t]) return zhMap[t];
@@ -691,7 +768,6 @@ function zhFast(text) {
     "是": "ใช่",
     "好": "โอเค",
     "好的": "โอเค",
-
     "剛剛": "เมื่อกี้",
     "刚刚": "เมื่อกี้",
     "現在": "ตอนนี้",
@@ -764,6 +840,10 @@ function buildStyleInstruction(style) {
 - 泰文「เขา / เค้า」不可一律翻成他，也可能是她。
 - 若句子明顯在討論第三人，不可翻成直接對話的你。
 - 看到「來幾天了、到了多久、跟她說了嗎、她有沒有來、她睡了嗎、她在哪裡」這類句型，優先判斷是否為第三人稱。
+
+電話場景特別注意：
+- วาง / วางสาย / ตัดสาย 常常是 掛電話，不是放東西。
+- 若上下文明顯在講電話，不可把 วาง 翻成 放下。
 `;
 
   const styles = {
@@ -786,7 +866,8 @@ async function translate(text, target, style = "auto") {
     return null;
   }
 
-  const cacheKey = `${style}__${target}__${text}`;
+  const normalizedSource = normalizeForPhoneContext(text);
+  const cacheKey = `${style}__${target}__${normalizedSource}`;
   const cached = getCachedTranslation(cacheKey);
   if (cached) {
     console.log("🧠 命中翻譯快取");
@@ -815,10 +896,11 @@ async function translate(text, target, style = "auto") {
                 `務必依聊天上下文判斷代詞：` +
                 `泰文的 เธอ 可能是你，也可能是她；เขา/เค้า 可能是他，也可能是她。` +
                 `如果句子是在談論第三人，不可翻成你。` +
+                `若句子是電話場景，วาง / วางสาย / ตัดสาย 請優先理解為掛電話。` +
                 `務必保持主詞、受詞、對象方向正確，` +
                 `不可把「我對她」翻成「她對我」，` +
                 `也不可把「拿回來」亂翻成「還給我」。` +
-                `只輸出翻譯結果：${text}`,
+                `只輸出翻譯結果：${normalizedSource}`,
             },
           ],
         },
@@ -1021,8 +1103,10 @@ function buildHelpText(isOwnerUser = false) {
 /mystyle
 /debuglang
 /dict list
+/request
 
-這版會自動依發話者切換頭像`;
+這版會自動依發話者切換頭像
+群組只能申請授權，不能自行啟用`;
 
   if (isOwnerUser) {
     msg += `
@@ -1030,8 +1114,8 @@ function buildHelpText(isOwnerUser = false) {
 管理員指令：
 
 /pending
-/approve
-/reject
+/approve 群組ID
+/reject 群組ID
 /style auto
 /style precise
 /style casual
@@ -1066,9 +1150,10 @@ async function handleJoin(event) {
       event,
       `🔐 此群組尚未授權
 
-請管理員輸入：
+請群組成員輸入：
+/request
 
-/approve`,
+再由管理員遠端授權`,
       sender
     );
     return;
@@ -1146,47 +1231,70 @@ async function handleTextMessage(event) {
       return;
     }
 
+    /* =========================
+       群組授權申請
+    ========================= */
+
+    if (text === "/request") {
+      if (!isGroupOrRoom(event)) {
+        await smartReply(event, "請在群組或聊天室使用", sender);
+        return;
+      }
+
+      addPending(id);
+      await smartReply(
+        event,
+        `📨 已送出授權申請
+
+群組ID：
+${id}
+
+請聯絡管理員遠端授權`,
+        sender
+      );
+      return;
+    }
+
+    /* =========================
+       OWNER 遠端授權
+    ========================= */
+
     if (isOwner(event)) {
       if (text === "/pending") {
         ensureDBShape();
+
         if (!db.pending.length) {
           await smartReply(event, "沒有待授權群組", sender);
           return;
         }
+
         await smartReply(event, `待授權群組：\n\n${db.pending.join("\n")}`, sender);
         return;
       }
 
-      if (text === "/approve") {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
+      if (text.startsWith("/approve ")) {
+        const gid = text.replace("/approve ", "").trim();
+
+        if (!gid) {
+          await smartReply(event, "格式錯誤\n請使用：/approve 群組ID", sender);
           return;
         }
-        approveGroup(id);
-        await smartReply(event, "✅ 群組授權成功", sender);
+
+        approveGroup(gid);
+        await smartReply(event, `✅ 已授權群組\n${gid}`, sender);
         return;
       }
 
-      if (text === "/reject") {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
+      if (text.startsWith("/reject ")) {
+        const gid = text.replace("/reject ", "").trim();
+
+        if (!gid) {
+          await smartReply(event, "格式錯誤\n請使用：/reject 群組ID", sender);
           return;
         }
 
-        rejectGroup(id);
-        const ok = await smartReply(event, "❌ 已拒絕並退出", sender);
-
-        if (ok) {
-          try {
-            if (event.source.type === "group") {
-              await client.leaveGroup(id);
-            } else if (event.source.type === "room") {
-              await client.leaveRoom(id);
-            }
-          } catch (e) {
-            console.error("❌ 離開群組/聊天室失敗:", e?.message || e);
-          }
-        }
+        rejectGroup(gid);
+        await smartReply(event, `❌ 已拒絕群組\n${gid}`, sender);
         return;
       }
 
@@ -1324,8 +1432,21 @@ async function handleTextMessage(event) {
       }
     }
 
+    /* =========================
+       未授權群組
+    ========================= */
+
     if (isGroupOrRoom(event) && !isAllowed(id)) {
-      await smartReply(event, "⛔ 此群組尚未授權", sender);
+      await smartReply(
+        event,
+        `⛔ 此群組尚未授權
+
+請先輸入：
+/request
+
+由管理員遠端授權後才能翻譯`,
+        sender
+      );
       return;
     }
 
@@ -1349,7 +1470,7 @@ async function handleTextMessage(event) {
 
     const lang = detectLang(text);
 
-    // mixed 或雙語區塊一律改成逐行翻譯
+    // mixed / 雙語區塊
     if (lang === "mixed" || isLikelyBilingualBlock(text)) {
       console.log("🔀 mixed / 雙語區塊，改為逐行翻譯");
       const mixedResult = await translateMixedLines(text, style);
@@ -1439,12 +1560,13 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.7",
+    version: "4.6.8",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
     inflightChats: inflightByChat.size,
     dbLoaded: !!db,
+    ownerConfigured: !!OWNER,
   });
 });
 
@@ -1475,5 +1597,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.7 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.6.8 RUNNING ON PORT ${PORT}`);
 });
