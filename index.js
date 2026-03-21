@@ -3,10 +3,25 @@ import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import fs from "fs";
+import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.0 START");
+console.log("🚀 BOT v4.7.1 START");
+
+/* =========================
+   OPENCC
+========================= */
+
+const toTraditional = Converter({ from: "cn", to: "tw" });
+
+function toTraditionalChinese(text = "") {
+  try {
+    return toTraditional(String(text || ""));
+  } catch {
+    return String(text || "");
+  }
+}
 
 /* =========================
    ENV CHECK
@@ -111,7 +126,7 @@ function saveDB() {
 }
 
 /* =========================
-   RUNTIME CACHE
+   CACHE
 ========================= */
 
 const translationCache = new Map();
@@ -206,7 +221,7 @@ function leaveInflight(chatId) {
 }
 
 /* =========================
-   工具
+   BASIC HELPERS
 ========================= */
 
 function safeGetId(event) {
@@ -341,8 +356,6 @@ function buildDictList(id) {
     .join("\n")}`;
 }
 
-/* ===== 全域詞典 ===== */
-
 function getGlobalDict() {
   ensureDBShape();
   return db.globalDict || {};
@@ -398,8 +411,18 @@ function shouldIgnoreText(text) {
   return false;
 }
 
+function shouldSkipTranslateToken(text = "") {
+  const t = String(text || "").trim().toUpperCase();
+  return /^(?:\d+\s*)?(IN|OUT)$/.test(t);
+}
+
+function looksLikeAddress(text = "") {
+  const t = String(text || "").trim();
+  return /(\d+號|\d+F|路|街|段|巷|弄|區|市|縣)/.test(t);
+}
+
 /* =========================
-   自動發話者頭像
+   PROFILE
 ========================= */
 
 function buildProfileCacheKey(event) {
@@ -461,7 +484,7 @@ async function fetchLineProfile(event) {
 }
 
 /* =========================
-   語言判斷 / 混合內容判斷
+   LANG DETECT
 ========================= */
 
 function hasThai(text = "") {
@@ -514,7 +537,7 @@ function isLikelyBilingualBlock(text = "") {
 }
 
 /* =========================
-   場景語意保護 / 電話語境
+   PHONE CONTEXT
 ========================= */
 
 function normalizeForPhoneContext(text = "") {
@@ -535,7 +558,7 @@ function normalizeForPhoneContext(text = "") {
 }
 
 /* =========================
-   高風險片語保護
+   PROTECTED PHRASES
 ========================= */
 
 function protectedPhraseTranslate(text, lang) {
@@ -709,7 +732,7 @@ function protectedPhraseTranslate(text, lang) {
 }
 
 /* =========================
-   快翻
+   FAST TRANSLATE
 ========================= */
 
 function thaiFast(text) {
@@ -804,7 +827,7 @@ function enFast(text) {
 }
 
 /* =========================
-   fallback
+   FALLBACK
 ========================= */
 
 function fallbackMessage(lang) {
@@ -814,7 +837,7 @@ function fallbackMessage(lang) {
 }
 
 /* =========================
-   Prompt / 翻譯
+   PROMPT
 ========================= */
 
 function buildStyleInstruction(style) {
@@ -945,7 +968,7 @@ ${normalizedSource}`,
       const result = r?.choices?.[0]?.message?.content?.trim();
 
       if (result) {
-        const clean = safeText(result);
+        const clean = toTraditionalChinese(safeText(result));
 
         if (isModelRefusal(clean)) {
           console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
@@ -1040,65 +1063,65 @@ async function translateMixedLines(text, style = "auto") {
     if (lang === "zh") {
       const fast = zhFast(line);
       if (fast) {
-        out.push(fast);
+        out.push(toTraditionalChinese(fast));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(protectedResult);
+        out.push(toTraditionalChinese(protectedResult));
         continue;
       }
 
       const result = await translate(line, "泰文", style);
-      out.push(result || line);
+      out.push(toTraditionalChinese(result || line));
       continue;
     }
 
     if (lang === "th") {
       const fast = thaiFast(line);
       if (fast) {
-        out.push(fast);
+        out.push(toTraditionalChinese(fast));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(protectedResult);
+        out.push(toTraditionalChinese(protectedResult));
         continue;
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(result || line);
+      out.push(toTraditionalChinese(result || line));
       continue;
     }
 
     if (lang === "en") {
       const fast = enFast(line);
       if (fast) {
-        out.push(fast);
+        out.push(toTraditionalChinese(fast));
         continue;
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(result || line);
+      out.push(toTraditionalChinese(result || line));
       continue;
     }
 
-    out.push(line);
+    out.push(toTraditionalChinese(line));
   }
 
   return out.join("\n");
 }
 
 /* =========================
-   LINE send
+   LINE SEND
 ========================= */
 
 function buildMessageObject(text, sender) {
   const message = {
     type: "text",
-    text: safeText(text),
+    text: toTraditionalChinese(safeText(text)),
   };
 
   if (sender?.name && sender?.iconUrl) {
@@ -1139,16 +1162,17 @@ async function safePush(to, text, sender) {
 
 async function smartReply(event, text, sender) {
   const pushTarget = getPushTarget(event);
+  const finalText = toTraditionalChinese(text);
 
-  const ok = await safeReply(event?.replyToken, text, sender);
+  const ok = await safeReply(event?.replyToken, finalText, sender);
   if (ok) return true;
 
   console.log("⚠️ reply 失敗，改用 push 補發");
-  return await safePush(pushTarget, text, sender);
+  return await safePush(pushTarget, finalText, sender);
 }
 
 /* =========================
-   指令說明
+   HELP
 ========================= */
 
 function buildHelpText(isOwnerUser = false) {
@@ -1196,7 +1220,7 @@ function buildHelpText(isOwnerUser = false) {
 }
 
 /* =========================
-   Event handlers
+   EVENT HANDLERS
 ========================= */
 
 async function handleJoin(event) {
@@ -1234,6 +1258,10 @@ async function handleTextMessage(event) {
   console.log("🎨 style:", style);
 
   if (shouldIgnoreText(text)) return;
+  if (shouldSkipTranslateToken(text)) {
+    console.log("⚠️ 命中不翻譯代碼:", text);
+    return;
+  }
   if (isDuplicateMessage(id, text)) return;
 
   if (!enterInflight(id)) {
@@ -1290,10 +1318,6 @@ async function handleTextMessage(event) {
       await smartReply(event, buildDictList(id), sender);
       return;
     }
-
-    /* =========================
-       OWNER 近端 / 遠端授權
-    ========================= */
 
     if (isOwner(event)) {
       if (text === "/approve") {
@@ -1490,10 +1514,6 @@ async function handleTextMessage(event) {
       }
     }
 
-    /* =========================
-       未授權群組
-    ========================= */
-
     if (isGroupOrRoom(event) && !isAllowed(id)) {
       await smartReply(
         event,
@@ -1509,44 +1529,44 @@ async function handleTextMessage(event) {
 
     if (text.startsWith("/")) return;
 
-    const normalizedText = normalizeDictKey(text);
-
-    // 1. 群組詞典
-    const groupDict = getDict(id);
-    if (groupDict[normalizedText]) {
-      await smartReply(event, groupDict[normalizedText], sender);
+    if (looksLikeAddress(text)) {
+      await smartReply(event, toTraditionalChinese(text), sender);
       return;
     }
 
-    // 2. 全域詞典
+    const normalizedText = normalizeDictKey(text);
+
+    const groupDict = getDict(id);
+    if (groupDict[normalizedText]) {
+      await smartReply(event, toTraditionalChinese(groupDict[normalizedText]), sender);
+      return;
+    }
+
     const globalDict = getGlobalDict();
     if (globalDict[normalizedText]) {
-      await smartReply(event, globalDict[normalizedText], sender);
+      await smartReply(event, toTraditionalChinese(globalDict[normalizedText]), sender);
       return;
     }
 
     const lang = detectLang(text);
 
-    // mixed / 雙語區塊
     if (lang === "mixed" || isLikelyBilingualBlock(text)) {
       console.log("🔀 mixed / 雙語區塊，改為逐行翻譯");
       const mixedResult = await translateMixedLines(text, style);
-      await smartReply(event, mixedResult, sender);
+      await smartReply(event, toTraditionalChinese(mixedResult), sender);
       return;
     }
 
-    // 3. 高風險片語保護
     const protectedResult = protectedPhraseTranslate(text, lang);
     if (protectedResult) {
-      await smartReply(event, protectedResult, sender);
+      await smartReply(event, toTraditionalChinese(protectedResult), sender);
       return;
     }
 
-    // 4. 快翻
     if (lang === "th") {
       const fast = thaiFast(text);
       if (fast) {
-        await smartReply(event, fast, sender);
+        await smartReply(event, toTraditionalChinese(fast), sender);
         return;
       }
     }
@@ -1554,7 +1574,7 @@ async function handleTextMessage(event) {
     if (lang === "zh") {
       const fast = zhFast(text);
       if (fast) {
-        await smartReply(event, fast, sender);
+        await smartReply(event, toTraditionalChinese(fast), sender);
         return;
       }
     }
@@ -1562,12 +1582,11 @@ async function handleTextMessage(event) {
     if (lang === "en") {
       const fast = enFast(text);
       if (fast) {
-        await smartReply(event, fast, sender);
+        await smartReply(event, toTraditionalChinese(fast), sender);
         return;
       }
     }
 
-    // 5. OpenAI
     const target = getTargetLanguage(lang);
     let result = await translate(text, target, style);
 
@@ -1575,7 +1594,7 @@ async function handleTextMessage(event) {
       result = fallbackMessage(lang);
     }
 
-    await smartReply(event, result, sender);
+    await smartReply(event, toTraditionalChinese(result), sender);
   } finally {
     leaveInflight(id);
   }
@@ -1607,7 +1626,7 @@ async function handleEvent(event) {
 }
 
 /* =========================
-   Routes
+   ROUTES
 ========================= */
 
 app.get("/", (req, res) => {
@@ -1617,7 +1636,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.7.0",
+    version: "4.7.1",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1650,9 +1669,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 /* =========================
-   Start
+   START
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.0 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.7.1 RUNNING ON PORT ${PORT}`);
 });
