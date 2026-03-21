@@ -6,7 +6,7 @@ import fs from "fs";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.6.9 START");
+console.log("🚀 BOT v4.7.0 START");
 
 /* =========================
    ENV CHECK
@@ -844,6 +844,18 @@ function buildStyleInstruction(style) {
 電話場景特別注意：
 - วาง / วางสาย / ตัดสาย 常常是 掛電話，不是放東西。
 - 若上下文明顯在講電話，不可把 วาง 翻成 放下。
+
+無論內容是否完整、是否像句子、是否有錯字，
+都必須強制翻譯成最合理的聊天意思。
+
+禁止回覆：
+- 請提供內容
+- 請提供需要翻譯的聊天訊息
+- 無法翻譯
+- 看不懂
+- 請輸入
+
+只能輸出翻譯結果。
 `;
 
   const styles = {
@@ -858,6 +870,19 @@ function buildStyleInstruction(style) {
   };
 
   return `${base}\n${styles[style] || styles.auto}`;
+}
+
+function isModelRefusal(text = "") {
+  const t = String(text || "");
+  return (
+    t.includes("請提供") ||
+    t.includes("无法翻译") ||
+    t.includes("無法翻譯") ||
+    t.includes("請輸入") ||
+    t.includes("看不懂") ||
+    t.includes("需要翻譯的聊天訊息") ||
+    t.includes("需要翻译的聊天讯息")
+  );
 }
 
 async function translate(text, target, style = "auto") {
@@ -892,15 +917,22 @@ async function translate(text, target, style = "auto") {
             {
               role: "user",
               content:
-                `請把這句聊天訊息翻譯成${target}。` +
-                `務必依聊天上下文判斷代詞：` +
-                `泰文的 เธอ 可能是你，也可能是她；เขา/เค้า 可能是他，也可能是她。` +
-                `如果句子是在談論第三人，不可翻成你。` +
-                `若句子是電話場景，วาง / วางสาย / ตัดสาย 請優先理解為掛電話。` +
-                `務必保持主詞、受詞、對象方向正確，` +
-                `不可把「我對她」翻成「她對我」，` +
-                `也不可把「拿回來」亂翻成「還給我」。` +
-                `只輸出翻譯結果：${normalizedSource}`,
+                `請把這句內容翻譯成${target}。
+
+無論內容是否完整、是否像句子、是否有錯字，
+都必須強制翻譯成最合理的聊天意思。
+
+禁止回覆：
+- 請提供內容
+- 請提供需要翻譯的聊天訊息
+- 無法翻譯
+- 看不懂
+- 請輸入
+
+只能輸出翻譯結果。
+
+內容如下：
+${normalizedSource}`,
             },
           ],
         },
@@ -914,6 +946,31 @@ async function translate(text, target, style = "auto") {
 
       if (result) {
         const clean = safeText(result);
+
+        if (isModelRefusal(clean)) {
+          console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
+
+          const fastZh = zhFast(text);
+          if (fastZh) {
+            setCachedTranslation(cacheKey, fastZh);
+            return fastZh;
+          }
+
+          const fastTh = thaiFast(text);
+          if (fastTh) {
+            setCachedTranslation(cacheKey, fastTh);
+            return fastTh;
+          }
+
+          const fastEn = enFast(text);
+          if (fastEn) {
+            setCachedTranslation(cacheKey, fastEn);
+            return fastEn;
+          }
+
+          setCachedTranslation(cacheKey, text);
+          return text;
+        }
 
         if (clean === text.trim() && text.trim().length <= 6) {
           const lang = detectLang(text);
@@ -1103,10 +1160,9 @@ function buildHelpText(isOwnerUser = false) {
 /mystyle
 /debuglang
 /dict list
-/request
 
 這版會自動依發話者切換頭像
-群組只能申請授權，不能自行啟用
+只有 OWNER 可以授權群組翻譯
 
 如果 OWNER 本人在群組內，可直接：
 /approve`;
@@ -1155,10 +1211,8 @@ async function handleJoin(event) {
       event,
       `🔐 此群組尚未授權
 
-請群組成員輸入：
-/request
-
-若 OWNER 本人在群組裡，可直接輸入：
+只有 OWNER 可以授權
+若 OWNER 本人在群組內，可直接輸入：
 /approve`,
       sender
     );
@@ -1437,30 +1491,6 @@ async function handleTextMessage(event) {
     }
 
     /* =========================
-       群組授權申請
-    ========================= */
-
-    if (text === "/request") {
-      if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用", sender);
-        return;
-      }
-
-      addPending(id);
-      await smartReply(
-        event,
-        `📨 已送出授權申請
-
-群組ID：
-${id}
-
-請聯絡管理員遠端授權`,
-        sender
-      );
-      return;
-    }
-
-    /* =========================
        未授權群組
     ========================= */
 
@@ -1469,9 +1499,7 @@ ${id}
         event,
         `⛔ 此群組尚未授權
 
-一般成員請輸入：
-/request
-
+只有 OWNER 可以啟用翻譯
 若 OWNER 本人在群組內，可直接輸入：
 /approve`,
         sender
@@ -1589,7 +1617,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.6.9",
+    version: "4.7.0",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1626,5 +1654,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.6.9 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.7.0 RUNNING ON PORT ${PORT}`);
 });
