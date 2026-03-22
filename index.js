@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.1 START");
+console.log("🚀 BOT v4.7.2 START");
 
 /* =========================
    OPENCC
@@ -21,6 +21,42 @@ function toTraditionalChinese(text = "") {
   } catch {
     return String(text || "");
   }
+}
+
+/* =========================
+   關鍵詞保護
+========================= */
+
+const KEYWORD_MAP = {
+  "突然": "__KW_TURAN__",
+  "剛剛": "__KW_GANGGANG__",
+  "刚刚": "__KW_GANGGANG__",
+  "剛才": "__KW_GANGGANG__",
+  "刚才": "__KW_GANGGANG__",
+  "現在": "__KW_NOW__",
+  "现在": "__KW_NOW__",
+};
+
+const KEYWORD_REVERSE = {
+  "__KW_TURAN__": "突然",
+  "__KW_GANGGANG__": "剛剛",
+  "__KW_NOW__": "現在",
+};
+
+function protectKeywords(text = "") {
+  let t = String(text || "");
+  for (const k in KEYWORD_MAP) {
+    t = t.replace(new RegExp(k, "g"), KEYWORD_MAP[k]);
+  }
+  return t;
+}
+
+function restoreKeywords(text = "") {
+  let t = String(text || "");
+  for (const k in KEYWORD_REVERSE) {
+    t = t.replace(new RegExp(k, "g"), KEYWORD_REVERSE[k]);
+  }
+  return t;
 }
 
 /* =========================
@@ -722,7 +758,9 @@ function protectedPhraseTranslate(text, lang) {
       "是不是現在":
         "ตอนนี้ใช่ไหม",
       "是不是现在":
-        "ตอนนี้ใช่ไหม"
+        "ตอนนี้ใช่ไหม",
+      "突然":
+        "ทันใดนั้น"
     };
 
     if (zhMap[t]) return zhMap[t];
@@ -806,7 +844,8 @@ function zhFast(text) {
     "剛才問你": "เมื่อกี้ฉันถามคุณ",
     "刚才问你": "เมื่อกี้ฉันถามคุณ",
     "剛才問你是不是現在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม",
-    "刚才问你是不是现在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม"
+    "刚才问你是不是现在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม",
+    "突然": "ทันใดนั้น"
   };
 
   return dict[t] || "";
@@ -868,6 +907,11 @@ function buildStyleInstruction(style) {
 - วาง / วางสาย / ตัดสาย 常常是 掛電話，不是放東西。
 - 若上下文明顯在講電話，不可把 วาง 翻成 放下。
 
+句子中若包含時間詞或語氣詞，例如：
+「剛剛、突然、現在、等一下」
+
+必須保留並正確翻譯，不可忽略、不可省略、不可改寫成其他語氣。
+
 無論內容是否完整、是否像句子、是否有錯字，
 都必須強制翻譯成最合理的聊天意思。
 
@@ -914,7 +958,8 @@ async function translate(text, target, style = "auto") {
     return null;
   }
 
-  const normalizedSource = normalizeForPhoneContext(text);
+  const protectedText = protectKeywords(text);
+  const normalizedSource = normalizeForPhoneContext(protectedText);
   const cacheKey = `${style}__${target}__${normalizedSource}`;
   const cached = getCachedTranslation(cacheKey);
   if (cached) {
@@ -968,7 +1013,8 @@ ${normalizedSource}`,
       const result = r?.choices?.[0]?.message?.content?.trim();
 
       if (result) {
-        const clean = toTraditionalChinese(safeText(result));
+        let clean = toTraditionalChinese(safeText(result));
+        clean = restoreKeywords(clean);
 
         if (isModelRefusal(clean)) {
           console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
@@ -1063,52 +1109,54 @@ async function translateMixedLines(text, style = "auto") {
     if (lang === "zh") {
       const fast = zhFast(line);
       if (fast) {
-        out.push(toTraditionalChinese(fast));
+        out.push(restoreKeywords(toTraditionalChinese(fast)));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(toTraditionalChinese(protectedResult));
+        out.push(restoreKeywords(toTraditionalChinese(protectedResult)));
         continue;
       }
 
-      const result = await translate(line, "泰文", style);
-      out.push(toTraditionalChinese(result || line));
+      const protectedLine = protectKeywords(line);
+      const result = await translate(protectedLine, "泰文", style);
+      out.push(restoreKeywords(toTraditionalChinese(result || line)));
       continue;
     }
 
     if (lang === "th") {
       const fast = thaiFast(line);
       if (fast) {
-        out.push(toTraditionalChinese(fast));
+        out.push(restoreKeywords(toTraditionalChinese(fast)));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(toTraditionalChinese(protectedResult));
+        out.push(restoreKeywords(toTraditionalChinese(protectedResult)));
         continue;
       }
 
-      const result = await translate(line, "繁體中文", style);
-      out.push(toTraditionalChinese(result || line));
+      const protectedLine = protectKeywords(line);
+      const result = await translate(protectedLine, "繁體中文", style);
+      out.push(restoreKeywords(toTraditionalChinese(result || line)));
       continue;
     }
 
     if (lang === "en") {
       const fast = enFast(line);
       if (fast) {
-        out.push(toTraditionalChinese(fast));
+        out.push(restoreKeywords(toTraditionalChinese(fast)));
         continue;
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(toTraditionalChinese(result || line));
+      out.push(restoreKeywords(toTraditionalChinese(result || line)));
       continue;
     }
 
-    out.push(toTraditionalChinese(line));
+    out.push(restoreKeywords(toTraditionalChinese(line)));
   }
 
   return out.join("\n");
@@ -1299,7 +1347,7 @@ async function handleTextMessage(event) {
 
     if (text === "/debuglang") {
       const lang = detectLang(text);
-      await smartReply(event, `語言判斷測試用指令本身：${lang}`, sender);
+      await smartReply(event, `判斷結果：${lang}`, sender);
       return;
     }
 
@@ -1636,7 +1684,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.7.1",
+    version: "4.7.2",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1673,5 +1721,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.1 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.7.2 RUNNING ON PORT ${PORT}`);
 });
