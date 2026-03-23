@@ -2,13 +2,35 @@ import express from "express";
 import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import fs from "fs";
+import { Converter } from "opencc-js";
 
 dotenv.config();
 
-const app = express();
+console.log("🚀 BOT v4.7.4 PRO START");
 
 /* =========================
-   LINE CONFIG
+   OPENCC
+========================= */
+
+const toTraditional = Converter({ from: "cn", to: "tw" });
+
+function toTraditionalChinese(text = "") {
+  try {
+    return toTraditional(String(text || ""));
+  } catch {
+    return String(text || "");
+  }
+}
+
+/* =========================
+   ENV
+========================= */
+
+const OWNER = process.env.OWNER_USER_ID || "";
+
+/* =========================
+   LINE
 ========================= */
 
 const config = {
@@ -27,27 +49,86 @@ const openai = new OpenAI({
 });
 
 /* =========================
-   BASIC
+   DB
 ========================= */
 
-function safeText(text) {
-  return String(text || "").slice(0, 5000);
+const DB_FILE = "./groups.json";
+
+function createDefaultDB() {
+  return {
+    allowed: [],
+    pending: [],
+    styles: {},
+    dicts: {},
+    globalDict: {},
+  };
+}
+
+function loadDB() {
+  try {
+    if (!fs.existsSync(DB_FILE)) {
+      const init = createDefaultDB();
+      fs.writeFileSync(DB_FILE, JSON.stringify(init, null, 2));
+      return init;
+    }
+    return JSON.parse(fs.readFileSync(DB_FILE));
+  } catch {
+    return createDefaultDB();
+  }
+}
+
+let db = loadDB();
+
+function saveDB() {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
 /* =========================
-   🔥 v4.7.4 FILTER
+   GROUP CONTROL
 ========================= */
 
-function shouldIgnoreText(text) {
-  const t = String(text || "").trim();
-  if (!t) return true;
-
-  if (/^[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+$/u.test(t) && t.length <= 8) {
-    return true;
-  }
-
-  return false;
+function isOwner(event) {
+  return (event?.source?.userId || "") === OWNER;
 }
+
+function getChatId(event) {
+  return (
+    event?.source?.groupId ||
+    event?.source?.roomId ||
+    event?.source?.userId ||
+    "default"
+  );
+}
+
+function isGroup(event) {
+  return event?.source?.type === "group" || event?.source?.type === "room";
+}
+
+function isAllowed(id) {
+  return db.allowed.includes(id);
+}
+
+function addPending(id) {
+  if (!db.pending.includes(id)) {
+    db.pending.push(id);
+    saveDB();
+  }
+}
+
+function approveGroup(id) {
+  db.pending = db.pending.filter((x) => x !== id);
+  if (!db.allowed.includes(id)) db.allowed.push(id);
+  saveDB();
+}
+
+function rejectGroup(id) {
+  db.pending = db.pending.filter((x) => x !== id);
+  saveDB();
+}
+
+/* =========================
+   FILTER（v4.7.4）
+========================= */
 
 function shouldSkipTranslateToken(text = "") {
   const t = String(text || "").trim().toUpperCase();
@@ -73,7 +154,7 @@ function shouldSkipMentionMessage(event) {
 }
 
 /* =========================
-   LANG DETECT
+   LANG
 ========================= */
 
 function hasThai(text = "") {
@@ -97,7 +178,7 @@ function getTargetLanguage(lang) {
 }
 
 /* =========================
-   FAST
+   FAST（短字）
 ========================= */
 
 function zhFast(text) {
@@ -117,15 +198,8 @@ function thaiFast(text) {
   return dict[text.trim()] || "";
 }
 
-function enFast(text) {
-  const dict = {
-    "ok": "好",
-  };
-  return dict[text.trim().toLowerCase()] || "";
-}
-
 /* =========================
-   GPT TRANSLATE
+   GPT
 ========================= */
 
 async function translate(text, target) {
@@ -135,7 +209,7 @@ async function translate(text, target) {
     messages: [
       {
         role: "system",
-        content: `你是中泰翻譯助手，只輸出翻譯結果，不要解釋`,
+        content: "你是中泰翻譯助手，只輸出翻譯結果",
       },
       {
         role: "user",
@@ -151,76 +225,119 @@ async function translate(text, target) {
    MAIN
 ========================= */
 
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  const events = req.body.events;
+async function handleEvent(event) {
+  if (event.type === "join") {
+    const id = getChatId(event);
 
-  for (const event of events) {
-    if (event.type !== "message") continue;
-    if (event.message.type !== "text") continue;
+    if (!isAllowed(id)) {
+      addPending(id);
 
-    const text = event.message.text.trim();
-
-    /* ===== 🔥 v4.7.4 核心 ===== */
-
-    if (shouldIgnoreText(text)) continue;
-
-    if (shouldSkipTranslateToken(text)) {
-      console.log("⚠️ IN/OUT 不翻:", text);
-      continue;
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "🔐 此群組尚未授權\n請 OWNER 輸入 /approve",
+      });
     }
 
-    if (shouldSkipMentionMessage(event)) {
-      console.log("⚠️ mention 不翻:", text);
-      continue;
-    }
-
-    /* ========================= */
-
-    const lang = detectLang(text);
-
-    /* ===== 🔥 短字才 fast ===== */
-    if (text.length <= 4) {
-      let fast = "";
-
-      if (lang === "zh") fast = zhFast(text);
-      if (lang === "th") fast = thaiFast(text);
-      if (lang === "en") fast = enFast(text);
-
-      if (fast) {
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: fast,
-        });
-        continue;
-      }
-    }
-
-    /* ===== GPT ===== */
-
-    const target = getTargetLanguage(lang);
-    let result = "";
-
-    try {
-      result = await translate(text, target);
-    } catch (e) {
-      result = text;
-    }
-
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: safeText(result),
-    });
+    return;
   }
 
-  res.sendStatus(200);
-});
+  if (event.type !== "message") return;
+  if (event.message.type !== "text") return;
+
+  const text = event.message.text.trim();
+  const id = getChatId(event);
+
+  /* ===== 指令 ===== */
+
+  if (text === "/approve" && isOwner(event)) {
+    approveGroup(id);
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "✅ 群組授權成功",
+    });
+    return;
+  }
+
+  if (text === "/reject" && isOwner(event)) {
+    rejectGroup(id);
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "❌ 已拒絕群組",
+    });
+    return;
+  }
+
+  if (text === "/pending" && isOwner(event)) {
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: db.pending.length
+        ? db.pending.join("\n")
+        : "沒有待授權群組",
+    });
+    return;
+  }
+
+  /* ===== 未授權 ===== */
+
+  if (isGroup(event) && !isAllowed(id)) {
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "⛔ 此群組尚未授權\n請 OWNER 輸入 /approve",
+    });
+    return;
+  }
+
+  /* ===== 過濾 ===== */
+
+  if (shouldSkipTranslateToken(text)) return;
+  if (shouldSkipMentionMessage(event)) return;
+
+  /* ===== 翻譯 ===== */
+
+  const lang = detectLang(text);
+
+  if (text.length <= 4) {
+    const fast =
+      lang === "zh" ? zhFast(text) :
+      lang === "th" ? thaiFast(text) :
+      "";
+
+    if (fast) {
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: toTraditionalChinese(fast),
+      });
+      return;
+    }
+  }
+
+  let result = text;
+
+  try {
+    result = await translate(text, getTargetLanguage(lang));
+  } catch (e) {
+    console.error(e);
+  }
+
+  await client.replyMessage(event.replyToken, {
+    type: "text",
+    text: toTraditionalChinese(result),
+  });
+}
 
 /* =========================
-   START
+   SERVER
 ========================= */
+
+const app = express();
+
+app.post("/webhook", line.middleware(config), async (req, res) => {
+  await Promise.all(req.body.events.map(handleEvent));
+  res.sendStatus(200);
+});
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("🚀 BOT v4.7.4 running");
+  console.log("🚀 BOT RUNNING ON " + PORT);
 });
