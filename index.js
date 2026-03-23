@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.2 START");
+console.log("🚀 BOT v4.7.3 START");
 
 /* =========================
    OPENCC
@@ -24,10 +24,10 @@ function toTraditionalChinese(text = "") {
 }
 
 /* =========================
-   關鍵詞保護
+   關鍵詞保護（依目標語言還原）
 ========================= */
 
-const KEYWORD_MAP = {
+const KEYWORD_PLACEHOLDERS = {
   "突然": "__KW_TURAN__",
   "剛剛": "__KW_GANGGANG__",
   "刚刚": "__KW_GANGGANG__",
@@ -37,25 +37,35 @@ const KEYWORD_MAP = {
   "现在": "__KW_NOW__",
 };
 
-const KEYWORD_REVERSE = {
-  "__KW_TURAN__": "突然",
-  "__KW_GANGGANG__": "剛剛",
-  "__KW_NOW__": "現在",
+const KEYWORD_BY_TARGET = {
+  "繁體中文": {
+    "__KW_TURAN__": "突然",
+    "__KW_GANGGANG__": "剛剛",
+    "__KW_NOW__": "現在",
+  },
+  "泰文": {
+    "__KW_TURAN__": "ทันใดนั้น",
+    "__KW_GANGGANG__": "เมื่อกี้",
+    "__KW_NOW__": "ตอนนี้",
+  },
 };
 
 function protectKeywords(text = "") {
   let t = String(text || "");
-  for (const k in KEYWORD_MAP) {
-    t = t.replace(new RegExp(k, "g"), KEYWORD_MAP[k]);
+  for (const [source, token] of Object.entries(KEYWORD_PLACEHOLDERS)) {
+    t = t.replace(new RegExp(source, "g"), token);
   }
   return t;
 }
 
-function restoreKeywords(text = "") {
+function restoreKeywordsByTarget(text = "", target = "繁體中文") {
   let t = String(text || "");
-  for (const k in KEYWORD_REVERSE) {
-    t = t.replace(new RegExp(k, "g"), KEYWORD_REVERSE[k]);
+  const map = KEYWORD_BY_TARGET[target] || {};
+
+  for (const [token, translated] of Object.entries(map)) {
+    t = t.replace(new RegExp(token, "g"), translated);
   }
+
   return t;
 }
 
@@ -1014,7 +1024,7 @@ ${normalizedSource}`,
 
       if (result) {
         let clean = toTraditionalChinese(safeText(result));
-        clean = restoreKeywords(clean);
+        clean = restoreKeywordsByTarget(clean, target);
 
         if (isModelRefusal(clean)) {
           console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
@@ -1109,54 +1119,52 @@ async function translateMixedLines(text, style = "auto") {
     if (lang === "zh") {
       const fast = zhFast(line);
       if (fast) {
-        out.push(restoreKeywords(toTraditionalChinese(fast)));
+        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "泰文"));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(restoreKeywords(toTraditionalChinese(protectedResult)));
+        out.push(restoreKeywordsByTarget(toTraditionalChinese(protectedResult), "泰文"));
         continue;
       }
 
-      const protectedLine = protectKeywords(line);
-      const result = await translate(protectedLine, "泰文", style);
-      out.push(restoreKeywords(toTraditionalChinese(result || line)));
+      const result = await translate(line, "泰文", style);
+      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "泰文"));
       continue;
     }
 
     if (lang === "th") {
       const fast = thaiFast(line);
       if (fast) {
-        out.push(restoreKeywords(toTraditionalChinese(fast)));
+        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
         continue;
       }
 
       const protectedResult = protectedPhraseTranslate(line, lang);
       if (protectedResult) {
-        out.push(restoreKeywords(toTraditionalChinese(protectedResult)));
+        out.push(restoreKeywordsByTarget(toTraditionalChinese(protectedResult), "繁體中文"));
         continue;
       }
 
-      const protectedLine = protectKeywords(line);
-      const result = await translate(protectedLine, "繁體中文", style);
-      out.push(restoreKeywords(toTraditionalChinese(result || line)));
+      const result = await translate(line, "繁體中文", style);
+      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
       continue;
     }
 
     if (lang === "en") {
       const fast = enFast(line);
       if (fast) {
-        out.push(restoreKeywords(toTraditionalChinese(fast)));
+        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
         continue;
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(restoreKeywords(toTraditionalChinese(result || line)));
+      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
       continue;
     }
 
-    out.push(restoreKeywords(toTraditionalChinese(line)));
+    out.push(toTraditionalChinese(line));
   }
 
   return out.join("\n");
@@ -1684,7 +1692,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.7.2",
+    version: "4.7.3",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1721,5 +1729,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.2 RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.7.3 RUNNING ON PORT ${PORT}`);
 });
