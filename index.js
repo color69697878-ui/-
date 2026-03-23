@@ -2,92 +2,13 @@ import express from "express";
 import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
 import dotenv from "dotenv";
-import fs from "fs";
-import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.3 START");
+const app = express();
 
 /* =========================
-   OPENCC
-========================= */
-
-const toTraditional = Converter({ from: "cn", to: "tw" });
-
-function toTraditionalChinese(text = "") {
-  try {
-    return toTraditional(String(text || ""));
-  } catch {
-    return String(text || "");
-  }
-}
-
-/* =========================
-   關鍵詞保護（依目標語言還原）
-========================= */
-
-const KEYWORD_PLACEHOLDERS = {
-  "突然": "__KW_TURAN__",
-  "剛剛": "__KW_GANGGANG__",
-  "刚刚": "__KW_GANGGANG__",
-  "剛才": "__KW_GANGGANG__",
-  "刚才": "__KW_GANGGANG__",
-  "現在": "__KW_NOW__",
-  "现在": "__KW_NOW__",
-};
-
-const KEYWORD_BY_TARGET = {
-  "繁體中文": {
-    "__KW_TURAN__": "突然",
-    "__KW_GANGGANG__": "剛剛",
-    "__KW_NOW__": "現在",
-  },
-  "泰文": {
-    "__KW_TURAN__": "ทันใดนั้น",
-    "__KW_GANGGANG__": "เมื่อกี้",
-    "__KW_NOW__": "ตอนนี้",
-  },
-};
-
-function protectKeywords(text = "") {
-  let t = String(text || "");
-  for (const [source, token] of Object.entries(KEYWORD_PLACEHOLDERS)) {
-    t = t.replace(new RegExp(source, "g"), token);
-  }
-  return t;
-}
-
-function restoreKeywordsByTarget(text = "", target = "繁體中文") {
-  let t = String(text || "");
-  const map = KEYWORD_BY_TARGET[target] || {};
-
-  for (const [token, translated] of Object.entries(map)) {
-    t = t.replace(new RegExp(token, "g"), translated);
-  }
-
-  return t;
-}
-
-/* =========================
-   ENV CHECK
-========================= */
-
-const REQUIRED_ENVS = [
-  "LINE_CHANNEL_ACCESS_TOKEN",
-  "LINE_CHANNEL_SECRET",
-  "OPENAI_API_KEY",
-  "OWNER_USER_ID",
-];
-
-for (const key of REQUIRED_ENVS) {
-  if (!process.env[key]) {
-    console.error(`❌ 缺少環境變數: ${key}`);
-  }
-}
-
-/* =========================
-   LINE
+   LINE CONFIG
 ========================= */
 
 const config = {
@@ -103,348 +24,19 @@ const client = new line.Client(config);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 12000,
-  maxRetries: 0,
 });
 
 /* =========================
-   APP
+   BASIC
 ========================= */
-
-const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const OWNER = process.env.OWNER_USER_ID || "";
-
-/* =========================
-   DB
-========================= */
-
-const DB_FILE = "./groups.json";
-
-function createDefaultDB() {
-  return {
-    allowed: [],
-    pending: [],
-    styles: {},
-    dicts: {},
-    globalDict: {},
-  };
-}
-
-function loadDB() {
-  try {
-    if (!fs.existsSync(DB_FILE)) {
-      const init = createDefaultDB();
-      fs.writeFileSync(DB_FILE, JSON.stringify(init, null, 2), "utf8");
-      return init;
-    }
-
-    const raw = fs.readFileSync(DB_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-
-    if (!parsed || typeof parsed !== "object") {
-      return createDefaultDB();
-    }
-
-    if (!Array.isArray(parsed.allowed)) parsed.allowed = [];
-    if (!Array.isArray(parsed.pending)) parsed.pending = [];
-    if (!parsed.styles || typeof parsed.styles !== "object") parsed.styles = {};
-    if (!parsed.dicts || typeof parsed.dicts !== "object") parsed.dicts = {};
-    if (!parsed.globalDict || typeof parsed.globalDict !== "object") parsed.globalDict = {};
-
-    return parsed;
-  } catch (e) {
-    console.error("❌ DB 讀取失敗，改用空資料:", e?.message || e);
-    return createDefaultDB();
-  }
-}
-
-let db = loadDB();
-
-function saveDB() {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
-    return true;
-  } catch (e) {
-    console.error("❌ DB 儲存失敗:", e?.message || e);
-    return false;
-  }
-}
-
-/* =========================
-   CACHE
-========================= */
-
-const translationCache = new Map();
-const CACHE_TTL = 1000 * 60 * 10;
-const CACHE_MAX = 500;
-
-const recentMessageMap = new Map();
-const DEDUPE_TTL = 4000;
-
-const inflightByChat = new Map();
-const MAX_INFLIGHT_PER_CHAT = 2;
-
-const profileCache = new Map();
-const PROFILE_TTL = 1000 * 60 * 60 * 12;
-const PROFILE_CACHE_MAX = 2000;
-
-function now() {
-  return Date.now();
-}
-
-function pruneCacheMap(map, ttl, maxSize = 1000) {
-  const t = now();
-
-  for (const [k, v] of map.entries()) {
-    const ts = typeof v === "object" && v?.ts ? v.ts : v;
-    if (!ts || t - ts > ttl) {
-      map.delete(k);
-    }
-  }
-
-  if (map.size <= maxSize) return;
-
-  const entries = [...map.entries()].sort((a, b) => {
-    const aTs = typeof a[1] === "object" && a[1]?.ts ? a[1].ts : a[1];
-    const bTs = typeof b[1] === "object" && b[1]?.ts ? b[1].ts : b[1];
-    return aTs - bTs;
-  });
-
-  const removeCount = map.size - maxSize;
-  for (let i = 0; i < removeCount; i++) {
-    map.delete(entries[i][0]);
-  }
-}
-
-function getCachedItem(map, key, ttl) {
-  const item = map.get(key);
-  if (!item) return null;
-  if (now() - item.ts > ttl) {
-    map.delete(key);
-    return null;
-  }
-  return item.value;
-}
-
-function setCachedItem(map, key, value, ttl, maxSize) {
-  pruneCacheMap(map, ttl, maxSize);
-  map.set(key, { value, ts: now() });
-}
-
-function getCachedTranslation(key) {
-  return getCachedItem(translationCache, key, CACHE_TTL);
-}
-
-function setCachedTranslation(key, value) {
-  setCachedItem(translationCache, key, value, CACHE_TTL, CACHE_MAX);
-}
-
-function isDuplicateMessage(chatId, text) {
-  const key = `${chatId}__${text}`;
-  pruneCacheMap(recentMessageMap, DEDUPE_TTL, 1000);
-
-  if (recentMessageMap.has(key)) return true;
-
-  recentMessageMap.set(key, now());
-  return false;
-}
-
-function enterInflight(chatId) {
-  const count = inflightByChat.get(chatId) || 0;
-  if (count >= MAX_INFLIGHT_PER_CHAT) return false;
-  inflightByChat.set(chatId, count + 1);
-  return true;
-}
-
-function leaveInflight(chatId) {
-  const count = inflightByChat.get(chatId) || 0;
-  if (count <= 1) {
-    inflightByChat.delete(chatId);
-    return;
-  }
-  inflightByChat.set(chatId, count - 1);
-}
-
-/* =========================
-   BASIC HELPERS
-========================= */
-
-function safeGetId(event) {
-  try {
-    return (
-      event?.source?.groupId ||
-      event?.source?.roomId ||
-      event?.source?.userId ||
-      "default"
-    );
-  } catch {
-    return "default";
-  }
-}
-
-function getPushTarget(event) {
-  return (
-    event?.source?.groupId ||
-    event?.source?.roomId ||
-    event?.source?.userId ||
-    ""
-  );
-}
-
-function isGroupOrRoom(event) {
-  return event?.source?.type === "group" || event?.source?.type === "room";
-}
-
-function isOwner(event) {
-  return (event?.source?.userId || "") === OWNER;
-}
-
-function ensureDBShape(id) {
-  if (!db || typeof db !== "object") db = createDefaultDB();
-  if (!Array.isArray(db.allowed)) db.allowed = [];
-  if (!Array.isArray(db.pending)) db.pending = [];
-  if (!db.styles || typeof db.styles !== "object") db.styles = {};
-  if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
-  if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
-
-  if (id) {
-    if (!db.styles[id]) db.styles[id] = "auto";
-    if (!db.dicts[id] || typeof db.dicts[id] !== "object") {
-      db.dicts[id] = {};
-    }
-  }
-}
-
-function isAllowed(id) {
-  ensureDBShape();
-  return db.allowed.includes(id);
-}
-
-function addPending(id) {
-  if (!id) return;
-  ensureDBShape(id);
-
-  if (!db.pending.includes(id)) {
-    db.pending.push(id);
-    saveDB();
-  }
-}
-
-function approveGroup(id) {
-  if (!id) return false;
-  ensureDBShape(id);
-
-  db.pending = db.pending.filter((x) => x !== id);
-  if (!db.allowed.includes(id)) db.allowed.push(id);
-  if (!db.styles[id]) db.styles[id] = "auto";
-
-  saveDB();
-  return true;
-}
-
-function rejectGroup(id) {
-  if (!id) return false;
-  ensureDBShape(id);
-  db.pending = db.pending.filter((x) => x !== id);
-  saveDB();
-  return true;
-}
-
-function getStyle(id) {
-  ensureDBShape(id);
-  return db.styles[id] || "auto";
-}
-
-function setStyle(id, style) {
-  ensureDBShape(id);
-  db.styles[id] = style;
-  saveDB();
-}
-
-function normalizeDictKey(text = "") {
-  return String(text || "").trim();
-}
-
-function getDict(id) {
-  ensureDBShape(id);
-  return db.dicts[id] || {};
-}
-
-function setDict(id, source, target) {
-  ensureDBShape(id);
-  const k = normalizeDictKey(source);
-  const v = String(target || "").trim();
-  if (!k || !v) return false;
-  db.dicts[id][k] = v;
-  saveDB();
-  return true;
-}
-
-function deleteDict(id, source) {
-  ensureDBShape(id);
-  const k = normalizeDictKey(source);
-  if (!(k in db.dicts[id])) return false;
-  delete db.dicts[id][k];
-  saveDB();
-  return true;
-}
-
-function buildDictList(id) {
-  const dict = getDict(id);
-  const entries = Object.entries(dict);
-
-  if (!entries.length) return "目前此群組沒有自訂詞典";
-
-  return `此群組自訂詞典：\n\n${entries
-    .slice(0, 100)
-    .map(([k, v], i) => `${i + 1}. ${k} => ${v}`)
-    .join("\n")}`;
-}
-
-function getGlobalDict() {
-  ensureDBShape();
-  return db.globalDict || {};
-}
-
-function setGlobalDict(source, target) {
-  ensureDBShape();
-  const k = normalizeDictKey(source);
-  const v = String(target || "").trim();
-  if (!k || !v) return false;
-  db.globalDict[k] = v;
-  saveDB();
-  return true;
-}
-
-function deleteGlobalDict(source) {
-  ensureDBShape();
-  const k = normalizeDictKey(source);
-  if (!(k in db.globalDict)) return false;
-  delete db.globalDict[k];
-  saveDB();
-  return true;
-}
-
-function buildGlobalDictList() {
-  const dict = getGlobalDict();
-  const entries = Object.entries(dict);
-
-  if (!entries.length) return "目前沒有全域詞典";
-
-  return `全域詞典：\n\n${entries
-    .slice(0, 200)
-    .map(([k, v], i) => `${i + 1}. ${k} => ${v}`)
-    .join("\n")}`;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function safeText(text) {
-  return String(text || "").replace(/\0/g, "").slice(0, 5000);
+  return String(text || "").slice(0, 5000);
 }
+
+/* =========================
+   🔥 v4.7.4 FILTER
+========================= */
 
 function shouldIgnoreText(text) {
   const t = String(text || "").trim();
@@ -459,74 +51,25 @@ function shouldIgnoreText(text) {
 
 function shouldSkipTranslateToken(text = "") {
   const t = String(text || "").trim().toUpperCase();
-  return /^(?:\d+\s*)?(IN|OUT)$/.test(t);
+  return /^(?:\d+\s*)?(IN|OUT)(?:\s*\d+)?$/.test(t);
 }
 
-function looksLikeAddress(text = "") {
-  const t = String(text || "").trim();
-  return /(\d+號|\d+F|路|街|段|巷|弄|區|市|縣)/.test(t);
-}
+function shouldSkipMentionMessage(event) {
+  const text = String(event?.message?.text || "").trim();
+  const mention = event?.message?.mention;
 
-/* =========================
-   PROFILE
-========================= */
+  if (mention?.mentionees?.length) {
+    const cleaned = text
+      .replace(/@\S+/g, "")
+      .replace(/[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+/gu, "")
+      .trim();
 
-function buildProfileCacheKey(event) {
-  const source = event?.source || {};
-  const chatId = source.groupId || source.roomId || source.userId || "default";
-  const userId = source.userId || "nouser";
-  const type = source.type || "unknown";
-  return `${type}:${chatId}:${userId}`;
-}
-
-async function fetchLineProfile(event) {
-  const source = event?.source || {};
-  const userId = source.userId;
-
-  if (!userId) return null;
-
-  const cacheKey = buildProfileCacheKey(event);
-  const cached = getCachedItem(profileCache, cacheKey, PROFILE_TTL);
-  if (cached !== null) return cached;
-
-  try {
-    let profile = null;
-
-    if (source.type === "user") {
-      profile = await client.getProfile(userId);
-    } else if (source.type === "group" && source.groupId) {
-      profile = await client.getGroupMemberProfile(source.groupId, userId);
-    } else if (source.type === "room" && source.roomId) {
-      profile = await client.getRoomMemberProfile(source.roomId, userId);
-    }
-
-    const name = String(profile?.displayName || "").trim();
-    const iconUrl = String(profile?.pictureUrl || "").trim();
-
-    if (!name || !iconUrl) {
-      setCachedItem(profileCache, cacheKey, null, PROFILE_TTL, PROFILE_CACHE_MAX);
-      return null;
-    }
-
-    const sender = {
-      name: name.slice(0, 20),
-      iconUrl,
-    };
-
-    setCachedItem(profileCache, cacheKey, sender, PROFILE_TTL, PROFILE_CACHE_MAX);
-    return sender;
-  } catch (e) {
-    console.error("❌ 取得 LINE profile 失敗:", {
-      message: e?.message || e,
-      sourceType: source.type,
-      groupId: source.groupId,
-      roomId: source.roomId,
-      userId,
-    });
-
-    setCachedItem(profileCache, cacheKey, null, PROFILE_TTL, PROFILE_CACHE_MAX);
-    return null;
+    if (!cleaned) return true;
   }
+
+  if (/^@\S+$/.test(text)) return true;
+
+  return false;
 }
 
 /* =========================
@@ -541,20 +84,10 @@ function hasChinese(text = "") {
   return /[\u4E00-\u9FFF]/.test(text);
 }
 
-function hasEnglish(text = "") {
-  return /[a-zA-Z]/.test(text);
-}
-
 function detectLang(text = "") {
-  const hasTh = hasThai(text);
-  const hasZh = hasChinese(text);
-  const hasEn = hasEnglish(text);
-
-  if (hasTh && !hasZh) return "th";
-  if (hasZh && !hasTh) return "zh";
-  if (!hasTh && !hasZh && hasEn) return "en";
-  if (hasTh && hasZh) return "mixed";
-  return "unknown";
+  if (hasThai(text)) return "th";
+  if (hasChinese(text)) return "zh";
+  return "en";
 }
 
 function getTargetLanguage(lang) {
@@ -563,1162 +96,120 @@ function getTargetLanguage(lang) {
   return "繁體中文";
 }
 
-function isLikelyBilingualBlock(text = "") {
-  const lines = String(text)
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (lines.length < 2) return false;
-
-  let hasZhLine = false;
-  let hasThLine = false;
-
-  for (const line of lines) {
-    if (hasChinese(line)) hasZhLine = true;
-    if (hasThai(line)) hasThLine = true;
-  }
-
-  return hasZhLine && hasThLine;
-}
-
 /* =========================
-   PHONE CONTEXT
+   FAST
 ========================= */
-
-function normalizeForPhoneContext(text = "") {
-  const t = String(text || "").trim();
-
-  const rules = [
-    [/ก่อนวางสาย/g, "ก่อน挂電話"],
-    [/วางสาย/g, "挂電話"],
-    [/ตัดสาย/g, "挂電話"],
-    [/ก่อนวาง/g, "掛電話前"],
-  ];
-
-  let out = t;
-  for (const [pattern, replacement] of rules) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
-}
-
-/* =========================
-   PROTECTED PHRASES
-========================= */
-
-function protectedPhraseTranslate(text, lang) {
-  const t = String(text || "").trim();
-
-  if (lang === "th") {
-    const thMap = {
-      "แค่ต้องการมือถือคืน ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน":
-        "我只是想把手機拿回來，我從昨天晚上就沒跟她聯絡了",
-      "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน":
-        "我從昨天晚上就沒跟她聯絡了",
-      "ฉันไม่ได้คุยกับเขาตั้งแต่เมื่อคืน":
-        "我從昨天晚上就沒跟他聯絡了",
-      "ขอมือถือคืน":
-        "把手機還給我",
-      "ขอคืน":
-        "把東西還給我",
-      "เอาคืน":
-        "拿回來",
-      "เอามือถือคืน":
-        "把手機拿回來",
-      "แค่ต้องการมือถือคืน":
-        "我只是想把手機拿回來",
-
-      "เธอมาถึงกี่วันแล้วคะ":
-        "她來幾天了？",
-      "เธอมาถึงกี่วันแล้วค่ะ":
-        "她來幾天了？",
-      "เธอมาถึงกี่วันแล้ว":
-        "她來幾天了？",
-      "เขามาถึงกี่วันแล้วคะ":
-        "她來幾天了？",
-      "เขามาถึงกี่วันแล้วค่ะ":
-        "她來幾天了？",
-      "เขามาถึงกี่วันแล้ว":
-        "她來幾天了？",
-
-      "คุณบอกเค้าแล้วหรอคะ":
-        "妳跟她說了嗎？",
-      "คุณบอกเค้าแล้วหรอค่ะ":
-        "妳跟她說了嗎？",
-      "คุณบอกเค้าแล้วหรือคะ":
-        "妳跟她說了嗎？",
-      "คุณบอกเขาแล้วหรอคะ":
-        "妳跟她說了嗎？",
-      "คุณบอกเขาแล้วหรือคะ":
-        "妳跟她說了嗎？",
-      "คุณบอกเค้าแล้วหรอ":
-        "妳跟她說了嗎？",
-      "คุณบอกเขาแล้วหรอ":
-        "妳跟她說了嗎？",
-
-      "เธอนอนหรอ":
-        "她睡了嗎？",
-      "เธอนอนแล้วหรอ":
-        "她睡了嗎？",
-      "เขานอนหรอ":
-        "她睡了嗎？",
-      "เขานอนแล้วหรอ":
-        "她睡了嗎？",
-
-      "เธอมาแล้วหรอ":
-        "她到了嗎？",
-      "เธอมาแล้วหรอคะ":
-        "她到了嗎？",
-      "เขามาแล้วหรอ":
-        "她到了嗎？",
-      "เขามาแล้วหรอคะ":
-        "她到了嗎？",
-
-      "เธออยู่ไหน":
-        "她在哪裡？",
-      "เขาอยู่ไหน":
-        "她在哪裡？",
-      "เค้าอยู่ไหน":
-        "她在哪裡？",
-
-      "ตอนนี้ฉันยังอยู่เถวหยวนอยู่เลยค่ะ":
-        "我現在還在桃園這邊喔",
-      "ตอนนี้ฉันยังอยู่เถาหยวนอยู่เลยค่ะ":
-        "我現在還在桃園這邊喔",
-      "ตอนนี้ฉันยังอยู่เถาย่วนอยู่เลยค่ะ":
-        "我現在還在桃園這邊喔",
-      "ตอนนี้ฉันยังอยู่แถวเถาหยวนอยู่เลยค่ะ":
-        "我現在還在桃園這邊喔",
-
-      "พรุ่งนี้เข้าไปร้านใหม่":
-        "明天去新的店",
-      "พรุ่งนี้ไปร้านใหม่":
-        "明天去新的店",
-      "พรุ่งนี้เข้าไปที่ร้านใหม่":
-        "明天去新的店",
-      "พรุ่งนี้เช้าไปร้านใหม่":
-        "明天早上去新的店",
-
-      "ฉันบอกคุณก่อนวางตลอด":
-        "我每次掛電話前都會先跟你說",
-      "ฉันบอกคุณก่อนวาง":
-        "我會先跟你說再掛電話",
-      "ก่อนวาง":
-        "掛電話之前",
-      "วางสาย":
-        "掛電話",
-      "ตัดสาย":
-        "掛電話",
-      "ไม่ใช่คุณคิดจะวางก็วาง":
-        "不是你想掛電話就掛",
-      "ไม่ใช่คิดจะวางก็วาง":
-        "不是想掛就掛"
-    };
-
-    if (thMap[t]) return thMap[t];
-  }
-
-  if (lang === "zh") {
-    const zhMap = {
-      "我從昨天晚上就沒跟她說話了":
-        "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
-      "我從昨晚就沒跟她聯絡了":
-        "ฉันไม่ได้คุยกับเธอตั้งแต่เมื่อคืน",
-      "我只是想把手機拿回來":
-        "แค่ต้องการเอามือถือคืน",
-      "把手機還給我":
-        "ขอมือถือคืน",
-      "她來幾天了？":
-        "เธอมาถึงกี่วันแล้วคะ",
-      "妳跟她說了嗎？":
-        "คุณบอกเค้าแล้วหรอคะ",
-      "她睡了嗎？":
-        "เธอนอนแล้วหรอ",
-      "她到了嗎？":
-        "เธอมาแล้วหรอ",
-      "她在哪裡？":
-        "เธออยู่ไหน",
-      "我早上沒辦法這麼早起床送你回去":
-        "ตอนเช้าฉันตื่นเช้าขนาดนั้นไม่ไหว เลยไปส่งเธอกลับไม่ได้",
-      "我沒辦法這麼早起床送你回去":
-        "ฉันตื่นเช้าขนาดนั้นไม่ไหว เลยไปส่งเธอกลับไม่ได้",
-      "我早上起不來":
-        "ตอนเช้าฉันตื่นไม่ไหว",
-      "我沒辦法去接你":
-        "ฉันไปรับเธอไม่ได้",
-      "我沒辦法送你回去":
-        "ฉันไปส่งเธอกลับไม่ได้",
-      "剛剛":
-        "เมื่อกี้",
-      "刚刚":
-        "เมื่อกี้",
-      "剛才":
-        "เมื่อกี้",
-      "刚才":
-        "เมื่อกี้",
-      "現在":
-        "ตอนนี้",
-      "现在":
-        "ตอนนี้",
-      "為什麼":
-        "ทำไม",
-      "为什么":
-        "ทำไม",
-      "是不是現在":
-        "ตอนนี้ใช่ไหม",
-      "是不是现在":
-        "ตอนนี้ใช่ไหม",
-      "突然":
-        "ทันใดนั้น"
-    };
-
-    if (zhMap[t]) return zhMap[t];
-  }
-
-  return "";
-}
-
-/* =========================
-   FAST TRANSLATE
-========================= */
-
-function thaiFast(text) {
-  const t = text.trim();
-
-  const dict = {
-    "ค่ะ": "好",
-    "ครับ": "好",
-    "คะ": "好",
-    "ใช่": "對",
-    "ใช่ค่ะ": "對",
-    "ใช่ครับ": "對",
-    "ได้": "可以",
-    "ได้ค่ะ": "可以",
-    "ได้ครับ": "可以",
-    "ยัง": "還沒",
-    "ไม่": "不",
-    "ไป": "去",
-    "มา": "來",
-    "ไปค่ะ": "會去",
-    "ไปครับ": "會去",
-    "มาค่ะ": "會來",
-    "มาครับ": "會來",
-    "ไปไหน": "要去哪",
-    "มาไหม": "要來嗎",
-    "ไปไหม": "要去嗎",
-    "ไม่ไป": "不去",
-    "ไม่มา": "不來",
-    "มาแล้ว": "來了",
-    "ไปแล้ว": "去了",
-    "กลับแล้ว": "回去了",
-    "ออกไปแล้ว": "離開了",
-    "ออกมาแล้ว": "出來了",
-    "โอเค": "好",
-    "โอเคค่ะ": "好",
-    "โอเคครับ": "好",
-  };
-
-  return dict[t] || "";
-}
 
 function zhFast(text) {
-  const t = text.trim();
-
   const dict = {
     "嗯": "อืม",
-    "恩": "อืม",
-    "喔": "อ๋อ",
-    "哦": "อ๋อ",
-    "嗯嗯": "อืม",
-    "可以": "ได้",
-    "去": "ไป",
-    "來": "มา",
-    "对": "ใช่",
-    "對": "ใช่",
-    "是": "ใช่",
     "好": "โอเค",
-    "好的": "โอเค",
-    "剛剛": "เมื่อกี้",
-    "刚刚": "เมื่อกี้",
     "現在": "ตอนนี้",
-    "现在": "ตอนนี้",
-    "等一下": "รอสักครู่",
-    "等一下喔": "รอสักครู่นะ",
-    "為什麼": "ทำไม",
-    "为什么": "ทำไม",
-    "是不是現在": "ตอนนี้ใช่ไหม",
-    "是不是现在": "ตอนนี้ใช่ไหม",
-    "剛才": "เมื่อกี้",
-    "刚才": "เมื่อกี้",
-    "剛才問你": "เมื่อกี้ฉันถามคุณ",
-    "刚才问你": "เมื่อกี้ฉันถามคุณ",
-    "剛才問你是不是現在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม",
-    "刚才问你是不是现在": "เมื่อกี้ฉันถามคุณว่าใช่ตอนนี้ไหม",
-    "突然": "ทันใดนั้น"
   };
+  return dict[text.trim()] || "";
+}
 
-  return dict[t] || "";
+function thaiFast(text) {
+  const dict = {
+    "ใช่": "對",
+    "โอเค": "好",
+  };
+  return dict[text.trim()] || "";
 }
 
 function enFast(text) {
-  const t = text.trim().toLowerCase();
-
   const dict = {
-    "now": "現在",
-    "why": "為什麼",
     "ok": "好",
-    "wait": "等一下",
-    "just now": "剛剛"
   };
-
-  return dict[t] || "";
+  return dict[text.trim().toLowerCase()] || "";
 }
 
 /* =========================
-   FALLBACK
+   GPT TRANSLATE
 ========================= */
 
-function fallbackMessage(lang) {
-  if (lang === "zh") return "稍等一下我再翻一次 🙏";
-  if (lang === "th") return "ขอเวลาสักครู่ เดี๋ยวฉันแปลให้อีกครั้ง 🙏";
-  return "Please wait a moment, I’ll translate it again 🙏";
+async function translate(text, target) {
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.05,
+    messages: [
+      {
+        role: "system",
+        content: `你是中泰翻譯助手，只輸出翻譯結果，不要解釋`,
+      },
+      {
+        role: "user",
+        content: `翻譯成${target}：${text}`,
+      },
+    ],
+  });
+
+  return r.choices[0].message.content.trim();
 }
 
 /* =========================
-   PROMPT
+   MAIN
 ========================= */
 
-function buildStyleInstruction(style) {
-  const base = `
-你是中泰聊天翻譯助手。
-只輸出翻譯結果。
-不要解釋，不要加引號，不要加前言，不要加備註。
-翻譯要自然、口語、符合聊天習慣。
-如果原文有明顯錯字、缺字、口語亂打，要先理解最可能原意再翻譯。
-如果句中出現疑似地名、音譯詞、不明專有名詞，不可自行腦補成喝酒、夜店、上班等場景。
-若無法確定不明詞意思，優先保守翻成某個地方，或保留主幹語意。
-若原文非常短，請用最自然的短句翻譯，不要擴寫。
+app.post("/webhook", line.middleware(config), async (req, res) => {
+  const events = req.body.events;
 
-嚴格保持人稱與關係方向正確：
-- 我對她 / 我對你 / 她對我 / 你對我，不可翻反。
-- 「我沒跟她說話」不可翻成「她沒跟我說話」。
-- 「我沒跟你說話」不可翻成「你沒跟我說話」。
-- 「跟她聯絡」與「她聯絡我」不可互換。
-- 「把手機拿回來」不可隨意翻成「把手機還給我」，除非原文明確表示對方要歸還。
+  for (const event of events) {
+    if (event.type !== "message") continue;
+    if (event.message.type !== "text") continue;
 
-嚴格根據上下文判斷代詞：
-- 泰文「เธอ」不可一律翻成你，可能是她。
-- 泰文「เขา / เค้า」不可一律翻成他，也可能是她。
-- 若句子明顯在討論第三人，不可翻成直接對話的你。
-- 看到「來幾天了、到了多久、跟她說了嗎、她有沒有來、她睡了嗎、她在哪裡」這類句型，優先判斷是否為第三人稱。
+    const text = event.message.text.trim();
 
-電話場景特別注意：
-- วาง / วางสาย / ตัดสาย 常常是 掛電話，不是放東西。
-- 若上下文明顯在講電話，不可把 วาง 翻成 放下。
+    /* ===== 🔥 v4.7.4 核心 ===== */
 
-句子中若包含時間詞或語氣詞，例如：
-「剛剛、突然、現在、等一下」
+    if (shouldIgnoreText(text)) continue;
 
-必須保留並正確翻譯，不可忽略、不可省略、不可改寫成其他語氣。
-
-無論內容是否完整、是否像句子、是否有錯字，
-都必須強制翻譯成最合理的聊天意思。
-
-禁止回覆：
-- 請提供內容
-- 請提供需要翻譯的聊天訊息
-- 無法翻譯
-- 看不懂
-- 請輸入
-
-只能輸出翻譯結果。
-`;
-
-  const styles = {
-    auto: "請自動選擇最自然的聊天語氣。",
-    precise: "請以原意優先，不要過度腦補。",
-    casual: "請用朋友聊天口氣。",
-    romance: "請保留感情與柔和語氣。",
-    nightlife: "你懂夜生活場景，但不可亂猜地名或活動。",
-    work: "請清楚自然，稍微正式。",
-    feminine: "請用自然柔和的女生聊天感。",
-    masculine: "請用自然直接的男生聊天感。",
-  };
-
-  return `${base}\n${styles[style] || styles.auto}`;
-}
-
-function isModelRefusal(text = "") {
-  const t = String(text || "");
-  return (
-    t.includes("請提供") ||
-    t.includes("无法翻译") ||
-    t.includes("無法翻譯") ||
-    t.includes("請輸入") ||
-    t.includes("看不懂") ||
-    t.includes("需要翻譯的聊天訊息") ||
-    t.includes("需要翻译的聊天讯息")
-  );
-}
-
-async function translate(text, target, style = "auto") {
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("❌ OPENAI_API_KEY 不存在");
-    return null;
-  }
-
-  const protectedText = protectKeywords(text);
-  const normalizedSource = normalizeForPhoneContext(protectedText);
-  const cacheKey = `${style}__${target}__${normalizedSource}`;
-  const cached = getCachedTranslation(cacheKey);
-  if (cached) {
-    console.log("🧠 命中翻譯快取");
-    return cached;
-  }
-
-  const maxAttempts = 2;
-
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      console.log(`🧠 OpenAI 翻譯中，第 ${i + 1}/${maxAttempts} 次`);
-
-      const r = await openai.chat.completions.create(
-        {
-          model: "gpt-4o-mini",
-          temperature: 0.15,
-          messages: [
-            {
-              role: "system",
-              content: buildStyleInstruction(style),
-            },
-            {
-              role: "user",
-              content:
-                `請把這句內容翻譯成${target}。
-
-無論內容是否完整、是否像句子、是否有錯字，
-都必須強制翻譯成最合理的聊天意思。
-
-禁止回覆：
-- 請提供內容
-- 請提供需要翻譯的聊天訊息
-- 無法翻譯
-- 看不懂
-- 請輸入
-
-只能輸出翻譯結果。
-
-內容如下：
-${normalizedSource}`,
-            },
-          ],
-        },
-        {
-          timeout: 10000,
-          maxRetries: 0,
-        }
-      );
-
-      const result = r?.choices?.[0]?.message?.content?.trim();
-
-      if (result) {
-        let clean = toTraditionalChinese(safeText(result));
-        clean = restoreKeywordsByTarget(clean, target);
-
-        if (isModelRefusal(clean)) {
-          console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
-
-          const fastZh = zhFast(text);
-          if (fastZh) {
-            setCachedTranslation(cacheKey, fastZh);
-            return fastZh;
-          }
-
-          const fastTh = thaiFast(text);
-          if (fastTh) {
-            setCachedTranslation(cacheKey, fastTh);
-            return fastTh;
-          }
-
-          const fastEn = enFast(text);
-          if (fastEn) {
-            setCachedTranslation(cacheKey, fastEn);
-            return fastEn;
-          }
-
-          setCachedTranslation(cacheKey, text);
-          return text;
-        }
-
-        if (clean === text.trim() && text.trim().length <= 6) {
-          const lang = detectLang(text);
-
-          if (lang === "zh") {
-            const fast = zhFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
-
-          if (lang === "th") {
-            const fast = thaiFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
-
-          if (lang === "en") {
-            const fast = enFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
-        }
-
-        setCachedTranslation(cacheKey, clean);
-        console.log("✅ OpenAI 翻譯成功");
-        return clean;
-      }
-    } catch (e) {
-      console.error(`❌ OpenAI error 第 ${i + 1} 次:`, {
-        name: e?.name,
-        message: e?.message,
-        status: e?.status,
-        code: e?.code,
-        type: e?.type,
-      });
-    }
-
-    if (i < maxAttempts - 1) {
-      await sleep(800);
-    }
-  }
-
-  return null;
-}
-
-async function translateMixedLines(text, style = "auto") {
-  const lines = String(text)
-    .split("\n")
-    .map((s) => s.trim());
-
-  const out = [];
-
-  for (const line of lines) {
-    if (!line) {
-      out.push("");
+    if (shouldSkipTranslateToken(text)) {
+      console.log("⚠️ IN/OUT 不翻:", text);
       continue;
     }
 
-    const lang = detectLang(line);
-
-    if (lang === "zh") {
-      const fast = zhFast(line);
-      if (fast) {
-        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "泰文"));
-        continue;
-      }
-
-      const protectedResult = protectedPhraseTranslate(line, lang);
-      if (protectedResult) {
-        out.push(restoreKeywordsByTarget(toTraditionalChinese(protectedResult), "泰文"));
-        continue;
-      }
-
-      const result = await translate(line, "泰文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "泰文"));
+    if (shouldSkipMentionMessage(event)) {
+      console.log("⚠️ mention 不翻:", text);
       continue;
     }
 
-    if (lang === "th") {
-      const fast = thaiFast(line);
-      if (fast) {
-        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
-        continue;
-      }
-
-      const protectedResult = protectedPhraseTranslate(line, lang);
-      if (protectedResult) {
-        out.push(restoreKeywordsByTarget(toTraditionalChinese(protectedResult), "繁體中文"));
-        continue;
-      }
-
-      const result = await translate(line, "繁體中文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
-      continue;
-    }
-
-    if (lang === "en") {
-      const fast = enFast(line);
-      if (fast) {
-        out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
-        continue;
-      }
-
-      const result = await translate(line, "繁體中文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
-      continue;
-    }
-
-    out.push(toTraditionalChinese(line));
-  }
-
-  return out.join("\n");
-}
-
-/* =========================
-   LINE SEND
-========================= */
-
-function buildMessageObject(text, sender) {
-  const message = {
-    type: "text",
-    text: toTraditionalChinese(safeText(text)),
-  };
-
-  if (sender?.name && sender?.iconUrl) {
-    message.sender = {
-      name: String(sender.name).slice(0, 20),
-      iconUrl: String(sender.iconUrl),
-    };
-  }
-
-  return message;
-}
-
-async function safeReply(replyToken, text, sender) {
-  if (!replyToken) return false;
-
-  try {
-    await client.replyMessage(replyToken, buildMessageObject(text, sender));
-    console.log("✅ reply 成功");
-    return true;
-  } catch (e) {
-    console.error("❌ reply 失敗:", e?.message || e);
-    return false;
-  }
-}
-
-async function safePush(to, text, sender) {
-  if (!to) return false;
-
-  try {
-    await client.pushMessage(to, buildMessageObject(text, sender));
-    console.log("✅ push 成功");
-    return true;
-  } catch (e) {
-    console.error("❌ push 失敗:", e?.message || e);
-    return false;
-  }
-}
-
-async function smartReply(event, text, sender) {
-  const pushTarget = getPushTarget(event);
-  const finalText = toTraditionalChinese(text);
-
-  const ok = await safeReply(event?.replyToken, finalText, sender);
-  if (ok) return true;
-
-  console.log("⚠️ reply 失敗，改用 push 補發");
-  return await safePush(pushTarget, finalText, sender);
-}
-
-/* =========================
-   HELP
-========================= */
-
-function buildHelpText(isOwnerUser = false) {
-  let msg = `可用指令：
-
-/help
-/myid
-/groupid
-/mystyle
-/debuglang
-/dict list
-
-這版會自動依發話者切換頭像
-只有 OWNER 可以授權群組翻譯
-
-如果 OWNER 本人在群組內，可直接：
-/approve`;
-
-  if (isOwnerUser) {
-    msg += `
-
-管理員指令：
-
-/pending
-/approve
-/reject
-/approve 群組ID
-/reject 群組ID
-/style auto
-/style precise
-/style casual
-/style romance
-/style nightlife
-/style work
-/style feminine
-/style masculine
-/dict add 原文 => 翻譯
-/dict del 原文
-/gdict list
-/gdict add 原文 => 翻譯
-/gdict del 原文`;
-  }
-
-  return msg;
-}
-
-/* =========================
-   EVENT HANDLERS
-========================= */
-
-async function handleJoin(event) {
-  const id = safeGetId(event);
-  const sender = await fetchLineProfile(event);
-
-  console.log("👥 join event, id:", id);
-
-  if (!isAllowed(id)) {
-    addPending(id);
-    await smartReply(
-      event,
-      `🔐 此群組尚未授權
-
-只有 OWNER 可以授權
-若 OWNER 本人在群組內，可直接輸入：
-/approve`,
-      sender
-    );
-    return;
-  }
-
-  await smartReply(event, "✅ 此群組已授權", sender);
-}
-
-async function handleTextMessage(event) {
-  const text = event?.message?.text?.trim();
-  if (!text) return;
-
-  const id = safeGetId(event);
-  const style = getStyle(id);
-
-  console.log("📩 收到訊息:", text);
-  console.log("🆔 id:", id);
-  console.log("🎨 style:", style);
-
-  if (shouldIgnoreText(text)) return;
-  if (shouldSkipTranslateToken(text)) {
-    console.log("⚠️ 命中不翻譯代碼:", text);
-    return;
-  }
-  if (isDuplicateMessage(id, text)) return;
-
-  if (!enterInflight(id)) {
-    const busySender = await fetchLineProfile(event);
-    await smartReply(event, "⚠️ 訊息較多，請稍後再試", busySender);
-    return;
-  }
-
-  try {
-    const sender = await fetchLineProfile(event);
-
-    if (text === "/help") {
-      await smartReply(event, buildHelpText(isOwner(event)), sender);
-      return;
-    }
-
-    if (text === "/myid") {
-      await smartReply(event, event?.source?.userId || "查不到 userId", sender);
-      return;
-    }
-
-    if (text === "/groupid") {
-      await smartReply(event, isGroupOrRoom(event) ? id : "這不是群組或聊天室", sender);
-      return;
-    }
-
-    if (text === "/mystyle") {
-      if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用", sender);
-        return;
-      }
-      await smartReply(event, `目前翻譯風格：${getStyle(id)}`, sender);
-      return;
-    }
-
-    if (text === "/debuglang") {
-      const lang = detectLang(text);
-      await smartReply(event, `判斷結果：${lang}`, sender);
-      return;
-    }
-
-    if (text.startsWith("/debuglang ")) {
-      const raw = text.replace("/debuglang ", "").trim();
-      const lang = detectLang(raw);
-      await smartReply(event, `判斷結果：${lang}`, sender);
-      return;
-    }
-
-    if (text === "/dict list") {
-      if (!isGroupOrRoom(event)) {
-        await smartReply(event, "請在群組或聊天室使用", sender);
-        return;
-      }
-      await smartReply(event, buildDictList(id), sender);
-      return;
-    }
-
-    if (isOwner(event)) {
-      if (text === "/approve") {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
-          return;
-        }
-
-        approveGroup(id);
-        await smartReply(event, "✅ 此群組授權成功", sender);
-        return;
-      }
-
-      if (text === "/reject") {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
-          return;
-        }
-
-        rejectGroup(id);
-        await smartReply(event, "❌ 已拒絕此群組", sender);
-        return;
-      }
-
-      if (text === "/pending") {
-        ensureDBShape();
-
-        if (!db.pending.length) {
-          await smartReply(event, "沒有待授權群組", sender);
-          return;
-        }
-
-        await smartReply(event, `待授權群組：\n\n${db.pending.join("\n")}`, sender);
-        return;
-      }
-
-      if (text.startsWith("/approve ")) {
-        const gid = text.replace("/approve ", "").trim();
-
-        if (!gid) {
-          await smartReply(event, "格式錯誤\n請使用：/approve 群組ID", sender);
-          return;
-        }
-
-        approveGroup(gid);
-        await smartReply(event, `✅ 已授權群組\n${gid}`, sender);
-        return;
-      }
-
-      if (text.startsWith("/reject ")) {
-        const gid = text.replace("/reject ", "").trim();
-
-        if (!gid) {
-          await smartReply(event, "格式錯誤\n請使用：/reject 群組ID", sender);
-          return;
-        }
-
-        rejectGroup(gid);
-        await smartReply(event, `❌ 已拒絕群組\n${gid}`, sender);
-        return;
-      }
-
-      if (text.startsWith("/style ")) {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
-          return;
-        }
-
-        const nextStyle = text.replace("/style ", "").trim();
-        const allowedStyles = [
-          "auto",
-          "precise",
-          "casual",
-          "romance",
-          "nightlife",
-          "work",
-          "feminine",
-          "masculine",
-        ];
-
-        if (!allowedStyles.includes(nextStyle)) {
-          await smartReply(
-            event,
-            "可用風格：\nauto\nprecise\ncasual\nromance\nnightlife\nwork\nfeminine\nmasculine",
-            sender
-          );
-          return;
-        }
-
-        setStyle(id, nextStyle);
-        await smartReply(event, `✅ 已切換翻譯風格：${nextStyle}`, sender);
-        return;
-      }
-
-      if (text.startsWith("/dict add ")) {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
-          return;
-        }
-
-        const raw = text.replace("/dict add ", "").trim();
-        const parts = raw.split("=>");
-
-        if (parts.length < 2) {
-          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯", sender);
-          return;
-        }
-
-        const source = parts[0].trim();
-        const target = parts.slice(1).join("=>").trim();
-
-        if (!source || !target) {
-          await smartReply(event, "格式錯誤\n請使用：/dict add 原文 => 翻譯", sender);
-          return;
-        }
-
-        const ok = setDict(id, source, target);
-        await smartReply(
-          event,
-          ok ? `✅ 已加入群組詞典\n${source} => ${target}` : "⚠️ 加入群組詞典失敗",
-          sender
-        );
-        return;
-      }
-
-      if (text.startsWith("/dict del ")) {
-        if (!isGroupOrRoom(event)) {
-          await smartReply(event, "請在群組或聊天室使用", sender);
-          return;
-        }
-
-        const source = text.replace("/dict del ", "").trim();
-
-        if (!source) {
-          await smartReply(event, "格式錯誤\n請使用：/dict del 原文", sender);
-          return;
-        }
-
-        const ok = deleteDict(id, source);
-        await smartReply(
-          event,
-          ok ? `✅ 已刪除群組詞典：${source}` : "⚠️ 找不到這筆群組詞典",
-          sender
-        );
-        return;
-      }
-
-      if (text === "/gdict list") {
-        await smartReply(event, buildGlobalDictList(), sender);
-        return;
-      }
-
-      if (text.startsWith("/gdict add ")) {
-        const raw = text.replace("/gdict add ", "").trim();
-        const parts = raw.split("=>");
-
-        if (parts.length < 2) {
-          await smartReply(event, "格式錯誤\n請使用：/gdict add 原文 => 翻譯", sender);
-          return;
-        }
-
-        const source = parts[0].trim();
-        const target = parts.slice(1).join("=>").trim();
-
-        if (!source || !target) {
-          await smartReply(event, "格式錯誤\n請使用：/gdict add 原文 => 翻譯", sender);
-          return;
-        }
-
-        const ok = setGlobalDict(source, target);
-        await smartReply(
-          event,
-          ok ? `✅ 已加入全域詞典\n${source} => ${target}` : "⚠️ 加入全域詞典失敗",
-          sender
-        );
-        return;
-      }
-
-      if (text.startsWith("/gdict del ")) {
-        const source = text.replace("/gdict del ", "").trim();
-
-        if (!source) {
-          await smartReply(event, "格式錯誤\n請使用：/gdict del 原文", sender);
-          return;
-        }
-
-        const ok = deleteGlobalDict(source);
-        await smartReply(
-          event,
-          ok ? `✅ 已刪除全域詞典：${source}` : "⚠️ 找不到這筆全域詞典",
-          sender
-        );
-        return;
-      }
-    }
-
-    if (isGroupOrRoom(event) && !isAllowed(id)) {
-      await smartReply(
-        event,
-        `⛔ 此群組尚未授權
-
-只有 OWNER 可以啟用翻譯
-若 OWNER 本人在群組內，可直接輸入：
-/approve`,
-        sender
-      );
-      return;
-    }
-
-    if (text.startsWith("/")) return;
-
-    if (looksLikeAddress(text)) {
-      await smartReply(event, toTraditionalChinese(text), sender);
-      return;
-    }
-
-    const normalizedText = normalizeDictKey(text);
-
-    const groupDict = getDict(id);
-    if (groupDict[normalizedText]) {
-      await smartReply(event, toTraditionalChinese(groupDict[normalizedText]), sender);
-      return;
-    }
-
-    const globalDict = getGlobalDict();
-    if (globalDict[normalizedText]) {
-      await smartReply(event, toTraditionalChinese(globalDict[normalizedText]), sender);
-      return;
-    }
+    /* ========================= */
 
     const lang = detectLang(text);
 
-    if (lang === "mixed" || isLikelyBilingualBlock(text)) {
-      console.log("🔀 mixed / 雙語區塊，改為逐行翻譯");
-      const mixedResult = await translateMixedLines(text, style);
-      await smartReply(event, toTraditionalChinese(mixedResult), sender);
-      return;
-    }
+    /* ===== 🔥 短字才 fast ===== */
+    if (text.length <= 4) {
+      let fast = "";
 
-    const protectedResult = protectedPhraseTranslate(text, lang);
-    if (protectedResult) {
-      await smartReply(event, toTraditionalChinese(protectedResult), sender);
-      return;
-    }
+      if (lang === "zh") fast = zhFast(text);
+      if (lang === "th") fast = thaiFast(text);
+      if (lang === "en") fast = enFast(text);
 
-    if (lang === "th") {
-      const fast = thaiFast(text);
       if (fast) {
-        await smartReply(event, toTraditionalChinese(fast), sender);
-        return;
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: fast,
+        });
+        continue;
       }
     }
 
-    if (lang === "zh") {
-      const fast = zhFast(text);
-      if (fast) {
-        await smartReply(event, toTraditionalChinese(fast), sender);
-        return;
-      }
-    }
-
-    if (lang === "en") {
-      const fast = enFast(text);
-      if (fast) {
-        await smartReply(event, toTraditionalChinese(fast), sender);
-        return;
-      }
-    }
+    /* ===== GPT ===== */
 
     const target = getTargetLanguage(lang);
-    let result = await translate(text, target, style);
-
-    if (!result) {
-      result = fallbackMessage(lang);
-    }
-
-    await smartReply(event, toTraditionalChinese(result), sender);
-  } finally {
-    leaveInflight(id);
-  }
-}
-
-async function handleEvent(event) {
-  try {
-    if (!event || !event.source) return;
-
-    if (event.type === "join") {
-      await handleJoin(event);
-      return;
-    }
-
-    if (event.type !== "message") return;
-    if (event.message?.type !== "text") return;
-
-    await handleTextMessage(event);
-  } catch (e) {
-    console.error("❌ handleEvent 爆掉:", e?.message || e);
+    let result = "";
 
     try {
-      const sender = await fetchLineProfile(event);
-      await smartReply(event, "⚠️ 系統忙碌中，請再試一次", sender);
-    } catch (err) {
-      console.error("❌ smartReply 失敗:", err?.message || err);
+      result = await translate(text, target);
+    } catch (e) {
+      result = text;
     }
-  }
-}
 
-/* =========================
-   ROUTES
-========================= */
-
-app.get("/", (req, res) => {
-  res.status(200).send("BOT OK");
-});
-
-app.get("/healthz", (req, res) => {
-  res.status(200).json({
-    ok: true,
-    version: "4.7.3",
-    uptime: process.uptime(),
-    cacheSize: translationCache.size,
-    profileCacheSize: profileCache.size,
-    inflightChats: inflightByChat.size,
-    dbLoaded: !!db,
-    ownerConfigured: !!OWNER,
-  });
-});
-
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  try {
-    const events = req?.body?.events || [];
-    console.log("📨 webhook 進來了，events:", events.length);
-
-    await Promise.all(
-      events.map(async (event, index) => {
-        try {
-          console.log(`➡️ 處理 event #${index + 1}`);
-          await handleEvent(event);
-        } catch (e) {
-          console.error(`❌ event #${index + 1} error:`, e?.message || e);
-        }
-      })
-    );
-  } catch (e) {
-    console.error("❌ webhook error:", e?.message || e);
+    await client.replyMessage(event.replyToken, {
+      type: "text",
+      text: safeText(result),
+    });
   }
 
   res.sendStatus(200);
@@ -1728,6 +219,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
    START
 ========================= */
 
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.3 RUNNING ON PORT ${PORT}`);
+  console.log("🚀 BOT v4.7.4 running");
 });
