@@ -1,3 +1,35 @@
+// ===== 指令（一定要放最前面） =====
+
+if (text === "/approve" && isOwner(e)) {
+  db.allowed.push(id);
+  db.pending = db.pending.filter(x => x !== id);
+  saveDB();
+
+  await client.replyMessage(e.replyToken, {
+    type: "text",
+    text: "✅ 已授權成功",
+  });
+  return;
+}
+
+if (text === "/pending" && isOwner(e)) {
+  await client.replyMessage(e.replyToken, {
+    type: "text",
+    text: db.pending.join("\n") || "沒有待授權",
+  });
+  return;
+}
+
+
+// ===== 未授權判斷（放後面） =====
+
+if (isGroup(e) && !isAllowed(id)) {
+  await client.replyMessage(e.replyToken, {
+    type: "text",
+    text: "⛔ 此群組尚未授權\n請輸入 /approve",
+  });
+  return;
+}
 import express from "express";
 import * as line from "@line/bot-sdk";
 import OpenAI from "openai";
