@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v5 SMART START");
+console.log("🚀 BOT v5.1 SMART START");
 
 /* =========================
    OPENCC
@@ -82,8 +82,8 @@ function createDefaultDB() {
     styles: {},
     dicts: {},
     globalDict: {},
-    userLangHints: {}, // v5: chatId -> userId -> { lang, ts, count }
-    settings: {}, // v5: chatId -> { autoLangMemory: true }
+    userLangHints: {},
+    settings: {},
   };
 }
 
@@ -558,9 +558,19 @@ function shouldSkipTranslateByContent(event) {
   return false;
 }
 
+/* =========================
+   ADDRESS / ROUTE
+========================= */
+
 function looksLikeAddress(text = "") {
   const t = String(text || "").trim();
-  return /(\d+號|\d+F|路|街|段|巷|弄|區|市|縣)/.test(t);
+
+  // 只有很像「純地址」才略過
+  // 不要把 2號房 / 3樓 / 紅色的門 這種指示句誤判
+  const pureAddressPattern =
+    /^(?:台灣|臺灣)?[\u4E00-\u9FFF\d\s\-]+(?:市|縣)(?:[\u4E00-\u9FFF\d\s\-]+(?:區|鄉|鎮|市))?(?:[\u4E00-\u9FFF\d\s\-]+(?:路|街|大道))(?:\d+段)?(?:\d+巷)?(?:\d+弄)?(?:\d+號)(?:\d+樓)?$/;
+
+  return pureAddressPattern.test(t);
 }
 
 /* =========================
@@ -652,7 +662,6 @@ function getUserLangHint(event) {
   const item = db.userLangHints?.[chatId]?.[userId];
   if (!item) return null;
 
-  // 7 天內有效
   if (now() - (item.ts || 0) > 1000 * 60 * 60 * 24 * 7) {
     return null;
   }
@@ -679,7 +688,7 @@ function detectLangSmart(text = "", event = null) {
 }
 
 /* =========================
-   QUESTION / VALIDATION
+   VALIDATION / QUESTION
 ========================= */
 
 function isTranslationValid(sourceText = "", translatedText = "", target = "") {
@@ -693,6 +702,20 @@ function isTranslationValid(sourceText = "", translatedText = "", target = "") {
   if (target === "繁體中文") return containsChinese(out);
 
   return true;
+}
+
+function forceValidFinalOutput(sourceText = "", outputText = "", sourceLang = "") {
+  const src = String(sourceText || "").trim();
+  const out = String(outputText || "").trim();
+
+  if (!out) return "";
+
+  if (src === out) return "";
+
+  if (sourceLang === "zh" && !containsThai(out)) return "";
+  if (sourceLang === "th" && !containsChinese(out)) return "";
+
+  return out;
 }
 
 function looksLikeQuestion(text = "") {
@@ -1034,7 +1057,6 @@ function shouldUseFastTranslate(text = "", lang = "unknown") {
   if (!t) return false;
 
   if (t.length <= 4) return true;
-
   if (lang === "zh" && /^[\u4E00-\u9FFF]{1,4}$/.test(t)) return true;
   if (lang === "th" && /^[\u0E00-\u0E7F]{1,6}$/.test(t)) return true;
   if (lang === "en" && /^[a-zA-Z\s]{1,8}$/.test(t)) return true;
@@ -1812,6 +1834,7 @@ async function handleTextMessage(event) {
 
     if (text.startsWith("/")) return;
 
+    // 只對純地址略過，不再對一般房號/樓層指示略過
     if (looksLikeAddress(text)) {
       await smartReply(event, toTraditionalChinese(text), sender);
       return;
@@ -1883,6 +1906,9 @@ async function handleTextMessage(event) {
     const target = getTargetLanguage(lang);
     let result = await translate(text, target, style, event);
 
+    // 最後一道防呆：避免原文或錯語言直接送出去
+    result = forceValidFinalOutput(text, result, lang);
+
     if (!result) {
       result = fallbackMessage(lang);
     }
@@ -1935,7 +1961,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "5.0-smart",
+    version: "5.1-smart",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1972,5 +1998,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v5 SMART RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v5.1 SMART RUNNING ON PORT ${PORT}`);
 });
