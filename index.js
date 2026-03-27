@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.4 FINAL START");
+console.log("🚀 BOT v4.7.6 FINAL START");
 
 /* =========================
    OPENCC
@@ -513,7 +513,7 @@ function isEmojiOrPunctuationOnly(text = "") {
   const t = String(text || "").trim();
   if (!t) return true;
 
-  return /^[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—]+$/u.test(
+  return /^[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+$/u.test(
     t
   );
 }
@@ -547,7 +547,7 @@ function shouldSkipMentionMessage(event) {
     const cleaned = text
       .replace(/@\S+/g, "")
       .replace(
-        /[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—]+/gu,
+        /[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+/gu,
         ""
       )
       .trim();
@@ -640,7 +640,7 @@ async function fetchLineProfile(event) {
 }
 
 /* =========================
-   LANG DETECT
+   LANG / QUESTION DETECT
 ========================= */
 
 function hasThai(text = "") {
@@ -653,6 +653,14 @@ function hasChinese(text = "") {
 
 function hasEnglish(text = "") {
   return /[a-zA-Z]/.test(text);
+}
+
+function containsThai(text = "") {
+  return /[\u0E00-\u0E7F]/.test(String(text || ""));
+}
+
+function containsChinese(text = "") {
+  return /[\u4E00-\u9FFF]/.test(String(text || ""));
 }
 
 function detectLang(text = "") {
@@ -690,6 +698,37 @@ function isLikelyBilingualBlock(text = "") {
   }
 
   return hasZhLine && hasThLine;
+}
+
+function isTranslationValid(sourceText = "", translatedText = "", target = "") {
+  const src = String(sourceText || "").trim();
+  const out = String(translatedText || "").trim();
+
+  if (!out) return false;
+  if (src === out) return false;
+
+  if (target === "泰文") return containsThai(out);
+  if (target === "繁體中文") return containsChinese(out);
+
+  return true;
+}
+
+function looksLikeQuestion(text = "") {
+  const t = String(text || "").trim();
+  return /[?？]|(嗎|吗|呢)$|(ใช่ไหม|ไหม|หรือเปล่า|เหรอ|หรอ|มั้ย)/.test(t);
+}
+
+function forceQuestionMarkByTarget(text = "", target = "", sourceText = "") {
+  const out = String(text || "").trim();
+  const src = String(sourceText || "").trim();
+
+  if (!looksLikeQuestion(src)) return out;
+  if (/[?？]$/.test(out)) return out;
+
+  if (target === "泰文") return `${out}？`;
+  if (target === "繁體中文") return `${out}？`;
+
+  return out;
 }
 
 /* =========================
@@ -934,6 +973,17 @@ function buildStyleInstruction(style) {
 應優先翻成「去X那邊拿／找X／在X那裡／從X那裡拿」，
 不要誤翻成「你給的」或其他關係語句。
 
+若內容是路線、位置、房號、樓層、電梯方向、門禁卡、感應卡、進房步驟，
+必須完整翻譯每個步驟，不可省略，不可直接照抄原文。
+
+例如：
+- 3樓 / 2號房 / 電梯右轉 / 紅色的門 / 感應卡進去
+這些都必須完整翻出來。
+
+若輸入是中文，必須輸出泰文。
+若輸入是泰文，必須輸出繁體中文。
+禁止原文照抄，禁止維持原語言不變。
+
 若原文非常短，請用最自然的短句翻譯，不要擴寫。
 
 嚴格保持人稱與關係方向正確：
@@ -956,6 +1006,9 @@ function buildStyleInstruction(style) {
 句子中若包含時間詞或語氣詞，例如：
 「剛剛、突然、現在、等一下」
 必須保留並正確翻譯，不可忽略、不可省略、不可改寫成其他語氣。
+
+若原文是問句，翻譯後也必須保留問句語氣。
+像「是嗎？」「對嗎？」「可以嗎？」「有了嗎？」不可翻成陳述句。
 
 無論內容是否完整、是否像句子、是否有錯字，
 都必須強制翻譯成最合理的聊天意思。
@@ -1062,58 +1115,20 @@ ${normalizedSource}`,
         let clean = toTraditionalChinese(safeText(result));
         clean = restoreKeywordsByTarget(clean, target);
         clean = restoreProperNouns(clean, properNounProtected.tokens);
+        clean = forceQuestionMarkByTarget(clean, target, text);
 
         if (isModelRefusal(clean)) {
-          console.log("⚠️ 偵測到AI拒答，改用快翻或原文保底");
-
-          const fastZh = zhFast(text);
-          if (fastZh) {
-            setCachedTranslation(cacheKey, fastZh);
-            return fastZh;
-          }
-
-          const fastTh = thaiFast(text);
-          if (fastTh) {
-            setCachedTranslation(cacheKey, fastTh);
-            return fastTh;
-          }
-
-          const fastEn = enFast(text);
-          if (fastEn) {
-            setCachedTranslation(cacheKey, fastEn);
-            return fastEn;
-          }
-
-          setCachedTranslation(cacheKey, text);
-          return text;
+          console.log("⚠️ 偵測到AI拒答");
+          return null;
         }
 
-        if (clean === text.trim() && text.trim().length <= 6) {
-          const lang = detectLang(text);
-
-          if (lang === "zh") {
-            const fast = zhFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
-
-          if (lang === "th") {
-            const fast = thaiFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
-
-          if (lang === "en") {
-            const fast = enFast(text);
-            if (fast) {
-              setCachedTranslation(cacheKey, fast);
-              return fast;
-            }
-          }
+        if (!isTranslationValid(text, clean, target)) {
+          console.log("⚠️ 翻譯結果無效，疑似未翻譯成功:", {
+            source: text,
+            output: clean,
+            target,
+          });
+          return null;
         }
 
         setCachedTranslation(cacheKey, clean);
@@ -1176,7 +1191,7 @@ async function translateMixedLines(text, style = "auto") {
       }
 
       const result = await translate(line, "泰文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "泰文"));
+      out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "泰文") : line);
       continue;
     }
 
@@ -1198,7 +1213,7 @@ async function translateMixedLines(text, style = "auto") {
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
+      out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "繁體中文") : line);
       continue;
     }
 
@@ -1212,7 +1227,7 @@ async function translateMixedLines(text, style = "auto") {
       }
 
       const result = await translate(line, "繁體中文", style);
-      out.push(restoreKeywordsByTarget(toTraditionalChinese(result || line), "繁體中文"));
+      out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "繁體中文") : line);
       continue;
     }
 
@@ -1389,7 +1404,7 @@ async function handleTextMessage(event) {
   try {
     const sender = await fetchLineProfile(event);
 
-    /* ===== 指令優先，放在未授權檢查前 ===== */
+    /* ===== 指令優先 ===== */
 
     if (text === "/help") {
       await smartReply(event, buildHelpText(isOwner(event)), sender);
@@ -1632,7 +1647,7 @@ async function handleTextMessage(event) {
       }
     }
 
-    /* ===== 未授權判斷，放在 /approve 後面 ===== */
+    /* ===== 未授權判斷放在 /approve 後面 ===== */
 
     if (isGroupOrRoom(event) && !isAllowed(id)) {
       await smartReply(
@@ -1762,7 +1777,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.7.4-final",
+    version: "4.7.6-final",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1799,5 +1814,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.4 FINAL RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v4.7.6 FINAL RUNNING ON PORT ${PORT}`);
 });
