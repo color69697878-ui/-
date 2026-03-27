@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 BOT v4.7.6 FINAL START");
+console.log("🚀 BOT v5 SMART START");
 
 /* =========================
    OPENCC
@@ -57,7 +57,7 @@ const client = new line.Client(config);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 12000,
+  timeout: 15000,
   maxRetries: 0,
 });
 
@@ -82,6 +82,8 @@ function createDefaultDB() {
     styles: {},
     dicts: {},
     globalDict: {},
+    userLangHints: {}, // v5: chatId -> userId -> { lang, ts, count }
+    settings: {}, // v5: chatId -> { autoLangMemory: true }
   };
 }
 
@@ -105,6 +107,8 @@ function loadDB() {
     if (!parsed.styles || typeof parsed.styles !== "object") parsed.styles = {};
     if (!parsed.dicts || typeof parsed.dicts !== "object") parsed.dicts = {};
     if (!parsed.globalDict || typeof parsed.globalDict !== "object") parsed.globalDict = {};
+    if (!parsed.userLangHints || typeof parsed.userLangHints !== "object") parsed.userLangHints = {};
+    if (!parsed.settings || typeof parsed.settings !== "object") parsed.settings = {};
 
     return parsed;
   } catch (e) {
@@ -125,13 +129,36 @@ function saveDB() {
   }
 }
 
+function ensureDBShape(id) {
+  if (!db || typeof db !== "object") db = createDefaultDB();
+  if (!Array.isArray(db.allowed)) db.allowed = [];
+  if (!Array.isArray(db.pending)) db.pending = [];
+  if (!db.styles || typeof db.styles !== "object") db.styles = {};
+  if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
+  if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
+  if (!db.userLangHints || typeof db.userLangHints !== "object") db.userLangHints = {};
+  if (!db.settings || typeof db.settings !== "object") db.settings = {};
+
+  if (id) {
+    if (!db.styles[id]) db.styles[id] = "auto";
+    if (!db.dicts[id] || typeof db.dicts[id] !== "object") db.dicts[id] = {};
+    if (!db.userLangHints[id] || typeof db.userLangHints[id] !== "object") db.userLangHints[id] = {};
+    if (!db.settings[id] || typeof db.settings[id] !== "object") {
+      db.settings[id] = { autoLangMemory: true };
+    }
+    if (typeof db.settings[id].autoLangMemory !== "boolean") {
+      db.settings[id].autoLangMemory = true;
+    }
+  }
+}
+
 /* =========================
    CACHE
 ========================= */
 
 const translationCache = new Map();
 const CACHE_TTL = 1000 * 60 * 10;
-const CACHE_MAX = 500;
+const CACHE_MAX = 700;
 
 const recentMessageMap = new Map();
 const DEDUPE_TTL = 4000;
@@ -254,21 +281,21 @@ function isOwner(event) {
   return (event?.source?.userId || "") === OWNER;
 }
 
-function ensureDBShape(id) {
-  if (!db || typeof db !== "object") db = createDefaultDB();
-  if (!Array.isArray(db.allowed)) db.allowed = [];
-  if (!Array.isArray(db.pending)) db.pending = [];
-  if (!db.styles || typeof db.styles !== "object") db.styles = {};
-  if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
-  if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
-
-  if (id) {
-    if (!db.styles[id]) db.styles[id] = "auto";
-    if (!db.dicts[id] || typeof db.dicts[id] !== "object") {
-      db.dicts[id] = {};
-    }
-  }
+function normalizeDictKey(text = "") {
+  return String(text || "").trim();
 }
+
+function safeText(text) {
+  return String(text || "").replace(/\0/g, "").slice(0, 5000);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/* =========================
+   AUTH / STYLE / SETTINGS
+========================= */
 
 function isAllowed(id) {
   ensureDBShape();
@@ -316,9 +343,20 @@ function setStyle(id, style) {
   saveDB();
 }
 
-function normalizeDictKey(text = "") {
-  return String(text || "").trim();
+function getChatSettings(id) {
+  ensureDBShape(id);
+  return db.settings[id] || { autoLangMemory: true };
 }
+
+function setAutoLangMemory(id, enabled) {
+  ensureDBShape(id);
+  db.settings[id].autoLangMemory = !!enabled;
+  saveDB();
+}
+
+/* =========================
+   DICT
+========================= */
 
 function getDict(id) {
   ensureDBShape(id);
@@ -392,191 +430,6 @@ function buildGlobalDictList() {
     .join("\n")}`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function safeText(text) {
-  return String(text || "").replace(/\0/g, "").slice(0, 5000);
-}
-
-/* =========================
-   KEYWORD PROTECTION
-========================= */
-
-const KEYWORD_PLACEHOLDERS = {
-  "突然": "__KW_TURAN__",
-  "剛剛": "__KW_GANGGANG__",
-  "刚刚": "__KW_GANGGANG__",
-  "剛才": "__KW_GANGGANG__",
-  "刚才": "__KW_GANGGANG__",
-  "現在": "__KW_NOW__",
-  "现在": "__KW_NOW__",
-};
-
-const KEYWORD_BY_TARGET = {
-  "繁體中文": {
-    "__KW_TURAN__": "突然",
-    "__KW_GANGGANG__": "剛剛",
-    "__KW_NOW__": "現在",
-  },
-  "泰文": {
-    "__KW_TURAN__": "ทันใดนั้น",
-    "__KW_GANGGANG__": "เมื่อกี้",
-    "__KW_NOW__": "ตอนนี้",
-  },
-};
-
-function protectKeywords(text = "") {
-  let t = String(text || "");
-  for (const [source, token] of Object.entries(KEYWORD_PLACEHOLDERS)) {
-    t = t.replace(new RegExp(source, "g"), token);
-  }
-  return t;
-}
-
-function restoreKeywordsByTarget(text = "", target = "繁體中文") {
-  let t = String(text || "");
-  const map = KEYWORD_BY_TARGET[target] || {};
-
-  for (const [token, translated] of Object.entries(map)) {
-    t = t.replace(new RegExp(token, "g"), translated);
-  }
-
-  return t;
-}
-
-/* =========================
-   PROPER NOUN PROTECTION
-========================= */
-
-const PROTECTED_TERMS = [
-  "Kitty",
-  "kitty",
-  "Nana",
-  "nana",
-  "Ploy",
-  "ploy",
-  "Praew",
-  "praew",
-  "Asok",
-  "asok",
-  "Bangkok",
-  "bangkok",
-  "LINE",
-  "Facebook",
-  "Instagram",
-  "桃園",
-  "中壢",
-  "板橋",
-  "台北",
-  "臺北",
-];
-
-function escapeRegExp(text = "") {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function protectProperNouns(text = "") {
-  let out = String(text || "");
-  const tokens = [];
-
-  for (let i = 0; i < PROTECTED_TERMS.length; i++) {
-    const term = PROTECTED_TERMS[i];
-    const token = `__PN_${i}__`;
-    const regex = new RegExp(escapeRegExp(term), "g");
-
-    if (regex.test(out)) {
-      out = out.replace(regex, token);
-      tokens.push([token, term]);
-    }
-  }
-
-  return { text: out, tokens };
-}
-
-function restoreProperNouns(text = "", tokens = []) {
-  let out = String(text || "");
-
-  for (const [token, term] of tokens) {
-    out = out.replace(new RegExp(escapeRegExp(token), "g"), term);
-  }
-
-  return out;
-}
-
-/* =========================
-   IGNORE / SKIP RULES
-========================= */
-
-function isEmojiOrPunctuationOnly(text = "") {
-  const t = String(text || "").trim();
-  if (!t) return true;
-
-  return /^[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+$/u.test(
-    t
-  );
-}
-
-function shouldIgnoreText(text) {
-  const t = String(text || "").trim();
-  if (!t) return true;
-
-  if (isEmojiOrPunctuationOnly(t)) return true;
-
-  if (
-    /^[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+$/u.test(t) &&
-    t.length <= 20
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-function shouldSkipTranslateToken(text = "") {
-  const t = String(text || "").trim().toUpperCase();
-  return /^(?:\d+\s*)?(IN|OUT)(?:\s*\d+)?$/.test(t);
-}
-
-function shouldSkipMentionMessage(event) {
-  const text = String(event?.message?.text || "").trim();
-  const mention = event?.message?.mention;
-
-  if (mention?.mentionees?.length) {
-    const cleaned = text
-      .replace(/@\S+/g, "")
-      .replace(
-        /[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+/gu,
-        ""
-      )
-      .trim();
-
-    if (!cleaned) return true;
-  }
-
-  if (/^@\S+$/.test(text)) return true;
-
-  return false;
-}
-
-function shouldSkipTranslateByContent(event) {
-  const message = event?.message || {};
-  const text = String(message?.text || "").trim();
-
-  if (message?.type && message.type !== "text") return true;
-  if (shouldIgnoreText(text)) return true;
-  if (shouldSkipTranslateToken(text)) return true;
-  if (shouldSkipMentionMessage(event)) return true;
-
-  return false;
-}
-
-function looksLikeAddress(text = "") {
-  const t = String(text || "").trim();
-  return /(\d+號|\d+F|路|街|段|巷|弄|區|市|縣)/.test(t);
-}
-
 /* =========================
    PROFILE
 ========================= */
@@ -640,7 +493,78 @@ async function fetchLineProfile(event) {
 }
 
 /* =========================
-   LANG / QUESTION DETECT
+   IGNORE / SKIP RULES
+========================= */
+
+function isEmojiOrPunctuationOnly(text = "") {
+  const t = String(text || "").trim();
+  if (!t) return true;
+
+  return /^[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+$/u.test(
+    t
+  );
+}
+
+function shouldIgnoreText(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  if (isEmojiOrPunctuationOnly(t)) return true;
+
+  if (
+    /^[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+$/u.test(t) &&
+    t.length <= 20
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function shouldSkipTranslateToken(text = "") {
+  const t = String(text || "").trim().toUpperCase();
+  return /^(?:\d+\s*)?(IN|OUT)(?:\s*\d+)?$/.test(t);
+}
+
+function shouldSkipMentionMessage(event) {
+  const text = String(event?.message?.text || "").trim();
+  const mention = event?.message?.mention;
+
+  if (mention?.mentionees?.length) {
+    const cleaned = text
+      .replace(/@\S+/g, "")
+      .replace(
+        /[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+/gu,
+        ""
+      )
+      .trim();
+
+    if (!cleaned) return true;
+  }
+
+  if (/^@\S+$/.test(text)) return true;
+
+  return false;
+}
+
+function shouldSkipTranslateByContent(event) {
+  const message = event?.message || {};
+  const text = String(message?.text || "").trim();
+
+  if (message?.type && message.type !== "text") return true;
+  if (shouldIgnoreText(text)) return true;
+  if (shouldSkipTranslateToken(text)) return true;
+  if (shouldSkipMentionMessage(event)) return true;
+
+  return false;
+}
+
+function looksLikeAddress(text = "") {
+  const t = String(text || "").trim();
+  return /(\d+號|\d+F|路|街|段|巷|弄|區|市|縣)/.test(t);
+}
+
+/* =========================
+   LANGUAGE / MEMORY
 ========================= */
 
 function hasThai(text = "") {
@@ -700,6 +624,64 @@ function isLikelyBilingualBlock(text = "") {
   return hasZhLine && hasThLine;
 }
 
+function updateUserLangHint(event, lang) {
+  const chatId = safeGetId(event);
+  const userId = event?.source?.userId || "";
+  if (!userId) return;
+  if (!["zh", "th", "en"].includes(lang)) return;
+
+  ensureDBShape(chatId);
+
+  const prev = db.userLangHints[chatId][userId];
+  const same = prev && prev.lang === lang;
+  db.userLangHints[chatId][userId] = {
+    lang,
+    ts: now(),
+    count: same ? Math.min((prev.count || 0) + 1, 50) : 1,
+  };
+  saveDB();
+}
+
+function getUserLangHint(event) {
+  const chatId = safeGetId(event);
+  const userId = event?.source?.userId || "";
+  if (!userId) return null;
+
+  ensureDBShape(chatId);
+
+  const item = db.userLangHints?.[chatId]?.[userId];
+  if (!item) return null;
+
+  // 7 天內有效
+  if (now() - (item.ts || 0) > 1000 * 60 * 60 * 24 * 7) {
+    return null;
+  }
+
+  return item;
+}
+
+function detectLangSmart(text = "", event = null) {
+  const direct = detectLang(text);
+  if (direct !== "unknown" && direct !== "mixed") return direct;
+
+  if (!event) return direct;
+
+  const chatId = safeGetId(event);
+  const settings = getChatSettings(chatId);
+  if (!settings.autoLangMemory) return direct;
+
+  const hint = getUserLangHint(event);
+  if (hint?.lang && hint.count >= 2) {
+    return hint.lang;
+  }
+
+  return direct;
+}
+
+/* =========================
+   QUESTION / VALIDATION
+========================= */
+
 function isTranslationValid(sourceText = "", translatedText = "", target = "") {
   const src = String(sourceText || "").trim();
   const out = String(translatedText || "").trim();
@@ -732,8 +714,105 @@ function forceQuestionMarkByTarget(text = "", target = "", sourceText = "") {
 }
 
 /* =========================
-   PHONE CONTEXT
+   PROTECTION
 ========================= */
+
+const KEYWORD_PLACEHOLDERS = {
+  "突然": "__KW_TURAN__",
+  "剛剛": "__KW_GANGGANG__",
+  "刚刚": "__KW_GANGGANG__",
+  "剛才": "__KW_GANGGANG__",
+  "刚才": "__KW_GANGGANG__",
+  "現在": "__KW_NOW__",
+  "现在": "__KW_NOW__",
+};
+
+const KEYWORD_BY_TARGET = {
+  "繁體中文": {
+    "__KW_TURAN__": "突然",
+    "__KW_GANGGANG__": "剛剛",
+    "__KW_NOW__": "現在",
+  },
+  "泰文": {
+    "__KW_TURAN__": "ทันใดนั้น",
+    "__KW_GANGGANG__": "เมื่อกี้",
+    "__KW_NOW__": "ตอนนี้",
+  },
+};
+
+function protectKeywords(text = "") {
+  let t = String(text || "");
+  for (const [source, token] of Object.entries(KEYWORD_PLACEHOLDERS)) {
+    t = t.replace(new RegExp(source, "g"), token);
+  }
+  return t;
+}
+
+function restoreKeywordsByTarget(text = "", target = "繁體中文") {
+  let t = String(text || "");
+  const map = KEYWORD_BY_TARGET[target] || {};
+
+  for (const [token, translated] of Object.entries(map)) {
+    t = t.replace(new RegExp(token, "g"), translated);
+  }
+
+  return t;
+}
+
+const PROTECTED_TERMS = [
+  "Kitty",
+  "kitty",
+  "Nana",
+  "nana",
+  "Ploy",
+  "ploy",
+  "Praew",
+  "praew",
+  "Asok",
+  "asok",
+  "Bangkok",
+  "bangkok",
+  "LINE",
+  "Facebook",
+  "Instagram",
+  "桃園",
+  "中壢",
+  "板橋",
+  "台北",
+  "臺北",
+];
+
+function escapeRegExp(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function protectProperNouns(text = "") {
+  let out = String(text || "");
+  const tokens = [];
+
+  for (let i = 0; i < PROTECTED_TERMS.length; i++) {
+    const term = PROTECTED_TERMS[i];
+    const token = `__PN_${i}__`;
+    const regex = new RegExp(escapeRegExp(term), "g");
+
+    if (regex.test(out)) {
+      out = out.replace(regex, token);
+      tokens.push([token, term]);
+    }
+  }
+
+  return { text: out, tokens };
+}
+
+function restoreProperNouns(text = "", tokens = []) {
+  let out = String(text || "");
+
+  for (const [token, term] of tokens) {
+    out = out.replace(new RegExp(escapeRegExp(token), "g"), term);
+  }
+
+  return out;
+}
 
 function normalizeForPhoneContext(text = "") {
   const t = String(text || "").trim();
@@ -947,6 +1026,23 @@ function fallbackMessage(lang) {
 }
 
 /* =========================
+   SMART ROUTING
+========================= */
+
+function shouldUseFastTranslate(text = "", lang = "unknown") {
+  const t = String(text || "").trim();
+  if (!t) return false;
+
+  if (t.length <= 4) return true;
+
+  if (lang === "zh" && /^[\u4E00-\u9FFF]{1,4}$/.test(t)) return true;
+  if (lang === "th" && /^[\u0E00-\u0E7F]{1,6}$/.test(t)) return true;
+  if (lang === "en" && /^[a-zA-Z\s]{1,8}$/.test(t)) return true;
+
+  return false;
+}
+
+/* =========================
    PROMPT
 ========================= */
 
@@ -984,7 +1080,8 @@ function buildStyleInstruction(style) {
 若輸入是泰文，必須輸出繁體中文。
 禁止原文照抄，禁止維持原語言不變。
 
-若原文非常短，請用最自然的短句翻譯，不要擴寫。
+若原文是問句，翻譯後也必須保留問句語氣。
+像「是嗎？」「對嗎？」「可以嗎？」「有了嗎？」不可翻成陳述句。
 
 嚴格保持人稱與關係方向正確：
 - 我對她 / 我對你 / 她對我 / 你對我，不可翻反。
@@ -1006,12 +1103,6 @@ function buildStyleInstruction(style) {
 句子中若包含時間詞或語氣詞，例如：
 「剛剛、突然、現在、等一下」
 必須保留並正確翻譯，不可忽略、不可省略、不可改寫成其他語氣。
-
-若原文是問句，翻譯後也必須保留問句語氣。
-像「是嗎？」「對嗎？」「可以嗎？」「有了嗎？」不可翻成陳述句。
-
-無論內容是否完整、是否像句子、是否有錯字，
-都必須強制翻譯成最合理的聊天意思。
 
 禁止回覆：
 - 請提供內容
@@ -1055,7 +1146,7 @@ function isModelRefusal(text = "") {
    GPT TRANSLATE
 ========================= */
 
-async function translate(text, target, style = "auto") {
+async function translate(text, target, style = "auto", event = null) {
   if (!process.env.OPENAI_API_KEY) {
     console.error("❌ OPENAI_API_KEY 不存在");
     return null;
@@ -1065,12 +1156,21 @@ async function translate(text, target, style = "auto") {
   const properNounProtected = protectProperNouns(protectedText);
   const normalizedSource = normalizeForPhoneContext(properNounProtected.text);
 
-  const cacheKey = `${style}__${target}__${normalizedSource}`;
+  const chatId = event ? safeGetId(event) : "default";
+  const langHint = event ? getUserLangHint(event) : null;
+  const settings = getChatSettings(chatId);
+
+  const cacheKey = `${style}__${target}__${normalizedSource}__${langHint?.lang || "nohint"}__${settings.autoLangMemory ? "mem1" : "mem0"}`;
   const cached = getCachedTranslation(cacheKey);
   if (cached) {
     console.log("🧠 命中翻譯快取");
     return cached;
   }
+
+  const memoryHintText =
+    settings.autoLangMemory && langHint?.lang && langHint?.count >= 2
+      ? `補充判斷：這位發話者近期多次使用 ${langHint.lang === "zh" ? "中文" : langHint.lang === "th" ? "泰文" : "英文"}。若原句過短或模糊，可優先參考此方向，但不可違反原文內容。`
+      : "";
 
   const maxAttempts = 2;
 
@@ -1093,10 +1193,12 @@ async function translate(text, target, style = "auto") {
                 `請把這句內容翻譯成${target}。
 
 無論內容是否完整、是否像句子、是否有錯字，
-都必須強制翻譯成最合理的聊天意思。
+都必須翻譯成最合理的聊天意思。
 
 句中若有專有名詞、人名、英文名、暱稱、地名，
 請保留原詞，不可亂翻。
+
+${memoryHintText}
 
 內容如下：
 ${normalizedSource}`,
@@ -1104,7 +1206,7 @@ ${normalizedSource}`,
           ],
         },
         {
-          timeout: 10000,
+          timeout: 12000,
           maxRetries: 0,
         }
       );
@@ -1119,7 +1221,7 @@ ${normalizedSource}`,
 
         if (isModelRefusal(clean)) {
           console.log("⚠️ 偵測到AI拒答");
-          return null;
+          continue;
         }
 
         if (!isTranslationValid(text, clean, target)) {
@@ -1128,7 +1230,7 @@ ${normalizedSource}`,
             output: clean,
             target,
           });
-          return null;
+          continue;
         }
 
         setCachedTranslation(cacheKey, clean);
@@ -1153,7 +1255,7 @@ ${normalizedSource}`,
   return null;
 }
 
-async function translateMixedLines(text, style = "auto") {
+async function translateMixedLines(text, style = "auto", event = null) {
   const lines = String(text)
     .split("\n")
     .map((s) => s.trim());
@@ -1171,10 +1273,10 @@ async function translateMixedLines(text, style = "auto") {
       continue;
     }
 
-    const lang = detectLang(line);
+    const lang = detectLangSmart(line, event);
 
     if (lang === "zh") {
-      if (line.length <= 4) {
+      if (shouldUseFastTranslate(line, lang)) {
         const fast = zhFast(line);
         if (fast) {
           out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "泰文"));
@@ -1190,13 +1292,13 @@ async function translateMixedLines(text, style = "auto") {
         }
       }
 
-      const result = await translate(line, "泰文", style);
+      const result = await translate(line, "泰文", style, event);
       out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "泰文") : line);
       continue;
     }
 
     if (lang === "th") {
-      if (line.length <= 4) {
+      if (shouldUseFastTranslate(line, lang)) {
         const fast = thaiFast(line);
         if (fast) {
           out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
@@ -1212,13 +1314,13 @@ async function translateMixedLines(text, style = "auto") {
         }
       }
 
-      const result = await translate(line, "繁體中文", style);
+      const result = await translate(line, "繁體中文", style, event);
       out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "繁體中文") : line);
       continue;
     }
 
     if (lang === "en") {
-      if (line.length <= 4) {
+      if (shouldUseFastTranslate(line, lang)) {
         const fast = enFast(line);
         if (fast) {
           out.push(restoreKeywordsByTarget(toTraditionalChinese(fast), "繁體中文"));
@@ -1226,7 +1328,7 @@ async function translateMixedLines(text, style = "auto") {
         }
       }
 
-      const result = await translate(line, "繁體中文", style);
+      const result = await translate(line, "繁體中文", style, event);
       out.push(result ? restoreKeywordsByTarget(toTraditionalChinese(result), "繁體中文") : line);
       continue;
     }
@@ -1298,7 +1400,9 @@ async function smartReply(event, text, sender) {
    HELP
 ========================= */
 
-function buildHelpText(isOwnerUser = false) {
+function buildHelpText(isOwnerUser = false, chatId = "") {
+  const settings = chatId ? getChatSettings(chatId) : { autoLangMemory: true };
+
   let msg = `可用指令：
 
 /help
@@ -1307,9 +1411,11 @@ function buildHelpText(isOwnerUser = false) {
 /mystyle
 /debuglang
 /dict list
+/langmemory
 
 這版會自動依發話者切換頭像
 只有 OWNER 可以授權群組翻譯
+目前智慧語言記憶：${settings.autoLangMemory ? "開啟" : "關閉"}
 
 如果 OWNER 本人在群組內，可直接：
 /approve`;
@@ -1332,6 +1438,8 @@ function buildHelpText(isOwnerUser = false) {
 /style work
 /style feminine
 /style masculine
+/langmemory on
+/langmemory off
 /dict list
 /dict add 原文 => 翻譯
 /dict del 原文
@@ -1407,7 +1515,7 @@ async function handleTextMessage(event) {
     /* ===== 指令優先 ===== */
 
     if (text === "/help") {
-      await smartReply(event, buildHelpText(isOwner(event)), sender);
+      await smartReply(event, buildHelpText(isOwner(event), id), sender);
       return;
     }
 
@@ -1430,16 +1538,36 @@ async function handleTextMessage(event) {
       return;
     }
 
+    if (text === "/langmemory") {
+      if (!isGroupOrRoom(event)) {
+        await smartReply(event, "請在群組或聊天室使用", sender);
+        return;
+      }
+      const enabled = getChatSettings(id).autoLangMemory;
+      await smartReply(event, `智慧語言記憶目前：${enabled ? "開啟" : "關閉"}`, sender);
+      return;
+    }
+
     if (text === "/debuglang") {
-      const lang = detectLang(text);
-      await smartReply(event, `判斷結果：${lang}`, sender);
+      const lang = detectLangSmart(text, event);
+      const hint = getUserLangHint(event);
+      await smartReply(
+        event,
+        `判斷結果：${lang}\n記憶提示：${hint ? `${hint.lang} / ${hint.count}` : "無"}`,
+        sender
+      );
       return;
     }
 
     if (text.startsWith("/debuglang ")) {
       const raw = text.replace("/debuglang ", "").trim();
-      const lang = detectLang(raw);
-      await smartReply(event, `判斷結果：${lang}`, sender);
+      const lang = detectLangSmart(raw, event);
+      const hint = getUserLangHint(event);
+      await smartReply(
+        event,
+        `判斷結果：${lang}\n記憶提示：${hint ? `${hint.lang} / ${hint.count}` : "無"}`,
+        sender
+      );
       return;
     }
 
@@ -1545,6 +1673,26 @@ async function handleTextMessage(event) {
         return;
       }
 
+      if (text === "/langmemory on") {
+        if (!isGroupOrRoom(event)) {
+          await smartReply(event, "請在群組或聊天室使用", sender);
+          return;
+        }
+        setAutoLangMemory(id, true);
+        await smartReply(event, "✅ 已開啟智慧語言記憶", sender);
+        return;
+      }
+
+      if (text === "/langmemory off") {
+        if (!isGroupOrRoom(event)) {
+          await smartReply(event, "請在群組或聊天室使用", sender);
+          return;
+        }
+        setAutoLangMemory(id, false);
+        await smartReply(event, "✅ 已關閉智慧語言記憶", sender);
+        return;
+      }
+
       if (text.startsWith("/dict add ")) {
         if (!isGroupOrRoom(event)) {
           await smartReply(event, "請在群組或聊天室使用", sender);
@@ -1647,7 +1795,7 @@ async function handleTextMessage(event) {
       }
     }
 
-    /* ===== 未授權判斷放在 /approve 後面 ===== */
+    /* ===== 未授權 ===== */
 
     if (isGroupOrRoom(event) && !isAllowed(id)) {
       await smartReply(
@@ -1683,11 +1831,11 @@ async function handleTextMessage(event) {
       return;
     }
 
-    const lang = detectLang(text);
+    let lang = detectLangSmart(text, event);
 
     if (lang === "mixed" || isLikelyBilingualBlock(text)) {
       console.log("🔀 mixed / 雙語區塊，改為逐行翻譯");
-      const mixedResult = await translateMixedLines(text, style);
+      const mixedResult = await translateMixedLines(text, style, event);
       await smartReply(event, toTraditionalChinese(mixedResult), sender);
       return;
     }
@@ -1696,15 +1844,19 @@ async function handleTextMessage(event) {
       const protectedResult = protectedPhraseTranslate(text, lang);
       if (protectedResult) {
         await smartReply(event, toTraditionalChinese(protectedResult), sender);
+        if (lang === "zh" || lang === "th" || lang === "en") {
+          updateUserLangHint(event, lang);
+        }
         return;
       }
     }
 
-    if (text.length <= 4) {
+    if (shouldUseFastTranslate(text, lang)) {
       if (lang === "th") {
         const fast = thaiFast(text);
         if (fast) {
           await smartReply(event, toTraditionalChinese(fast), sender);
+          updateUserLangHint(event, lang);
           return;
         }
       }
@@ -1713,6 +1865,7 @@ async function handleTextMessage(event) {
         const fast = zhFast(text);
         if (fast) {
           await smartReply(event, toTraditionalChinese(fast), sender);
+          updateUserLangHint(event, lang);
           return;
         }
       }
@@ -1721,19 +1874,24 @@ async function handleTextMessage(event) {
         const fast = enFast(text);
         if (fast) {
           await smartReply(event, toTraditionalChinese(fast), sender);
+          updateUserLangHint(event, lang);
           return;
         }
       }
     }
 
     const target = getTargetLanguage(lang);
-    let result = await translate(text, target, style);
+    let result = await translate(text, target, style, event);
 
     if (!result) {
       result = fallbackMessage(lang);
     }
 
     await smartReply(event, toTraditionalChinese(result), sender);
+
+    if (lang === "zh" || lang === "th" || lang === "en") {
+      updateUserLangHint(event, lang);
+    }
   } finally {
     leaveInflight(id);
   }
@@ -1777,7 +1935,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    version: "4.7.6-final",
+    version: "5.0-smart",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     profileCacheSize: profileCache.size,
@@ -1814,5 +1972,5 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 ========================= */
 
 app.listen(PORT, () => {
-  console.log(`🚀 BOT v4.7.6 FINAL RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 BOT v5 SMART RUNNING ON PORT ${PORT}`);
 });
