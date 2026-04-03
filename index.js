@@ -490,6 +490,7 @@ function getTargetLanguage(lang) {
   if (lang === "zh") return "泰文";
   if (lang === "th") return "繁體中文";
   if (lang === "en") return "繁體中文";
+  if (lang === "mixed") return "繁體中文";
   return "繁體中文";
 }
 
@@ -545,6 +546,9 @@ function shouldIgnoreText(text = "") {
     return true;
   }
 
+  // 很短代碼 / 房號 / 純英文符號類內容直接略過
+  if (/^[A-Z0-9_\- ]{1,20}$/.test(t)) return true;
+
   return false;
 }
 
@@ -566,6 +570,89 @@ function shouldSkipTranslateByContent(event) {
   if (shouldSkipTranslateToken(text)) return true;
 
   return false;
+}
+
+/* =========================
+   GLOBAL PROTECT
+========================= */
+
+// 完全不翻譯的固定字詞
+const NO_TRANSLATE_WORDS = [
+  "IN",
+  "OUT",
+  "VIP",
+  "VVIP",
+  "LINE",
+  "Telegram",
+  "WhatsApp",
+  "7-11",
+  "711",
+  "MAN CLUB",
+  "OpenAI",
+  "ChatGPT",
+  "Render",
+  "Node",
+  "API",
+  "BOT",
+  "Bot",
+  "bot",
+  "IG",
+  "FB",
+  "TikTok",
+  "Instagram",
+  "GPS",
+  "WiFi",
+  "wifi",
+  "ID",
+  "UID",
+];
+
+// 正則保護：帳號、網址、數字、時間等
+const NO_TRANSLATE_REGEX = [
+  /@\w+/g,
+  /#\w+/g,
+  /https?:\/\/[^\s]+/gi,
+  /\bt\.me\/[^\s]+/gi,
+  /\bwww\.[^\s]+/gi,
+  /\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b/g,
+  /\b\d{1,2}[:：]\d{2}\b/g,
+  /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g,
+  /\b\d+\b/g,
+];
+
+function protectKeywords(text = "") {
+  let result = String(text || "");
+  const placeholders = [];
+  let i = 0;
+
+  const addPlaceholder = (match) => {
+    const key = `__PROTECT_${i++}__`;
+    placeholders.push({ key, value: match });
+    return key;
+  };
+
+  // 先保護 regex
+  for (const reg of NO_TRANSLATE_REGEX) {
+    result = result.replace(reg, (m) => addPlaceholder(m));
+  }
+
+  // 再保護固定詞
+  for (const word of NO_TRANSLATE_WORDS) {
+    const reg = new RegExp(`\\b${escapeRegExp(word)}\\b`, "gi");
+    result = result.replace(reg, (m) => addPlaceholder(m));
+  }
+
+  return { text: result, placeholders };
+}
+
+function restoreKeywords(text = "", placeholders = []) {
+  let result = String(text || "");
+
+  for (const p of placeholders) {
+    result = result.replace(new RegExp(escapeRegExp(p.key), "g"), p.value);
+  }
+
+  return result;
 }
 
 /* =========================
@@ -668,7 +755,7 @@ function buildPrompt(style = "auto") {
 6. 如果原文是中文，翻成泰文
 7. 如果原文是泰文，翻成繁體中文
 8. 如果原文是英文短句，翻成繁體中文
-9. 專有名詞、品牌名、人名、地名可保留
+9. 專有名詞、品牌名、人名、地名、代碼、帳號、網址可保留
 10. 語氣風格：${styleText}
 `.trim();
 }
@@ -891,7 +978,7 @@ async function handleTextMessage(event) {
   }
 
   if (shouldSkipTranslateByContent(event)) {
-    console.log("⏭️ 略過翻譯：貼圖 / 非文字 / 純標記 / 純表情");
+    console.log("⏭️ 略過翻譯：貼圖 / 非文字 / 純標記 / 純表情 / 純代碼");
     return;
   }
 
@@ -947,7 +1034,15 @@ async function handleTextMessage(event) {
 
     if (!translated) {
       const target = getTargetLanguage(lang);
-      translated = await translateText(text, target, style);
+
+      // 先保護不該翻的詞
+      const { text: protectedText, placeholders } = protectKeywords(text);
+
+      // 翻譯
+      translated = await translateText(protectedText, target, style);
+
+      // 還原
+      translated = restoreKeywords(translated, placeholders);
     }
 
     if (!translated || translated.trim() === text.trim()) {
