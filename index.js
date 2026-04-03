@@ -82,7 +82,6 @@ function createDefaultDB() {
     styles: {},
     dicts: {},
     globalDict: {},
-    userLangHints: {},
     settings: {},
   };
 }
@@ -107,7 +106,6 @@ function loadDB() {
     if (!parsed.styles || typeof parsed.styles !== "object") parsed.styles = {};
     if (!parsed.dicts || typeof parsed.dicts !== "object") parsed.dicts = {};
     if (!parsed.globalDict || typeof parsed.globalDict !== "object") parsed.globalDict = {};
-    if (!parsed.userLangHints || typeof parsed.userLangHints !== "object") parsed.userLangHints = {};
     if (!parsed.settings || typeof parsed.settings !== "object") parsed.settings = {};
 
     return parsed;
@@ -129,25 +127,20 @@ function saveDB() {
   }
 }
 
-function ensureDBShape(id) {
+function ensureDBShape(id = "") {
   if (!db || typeof db !== "object") db = createDefaultDB();
   if (!Array.isArray(db.allowed)) db.allowed = [];
   if (!Array.isArray(db.pending)) db.pending = [];
   if (!db.styles || typeof db.styles !== "object") db.styles = {};
   if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
   if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
-  if (!db.userLangHints || typeof db.userLangHints !== "object") db.userLangHints = {};
   if (!db.settings || typeof db.settings !== "object") db.settings = {};
 
   if (id) {
     if (!db.styles[id]) db.styles[id] = "auto";
     if (!db.dicts[id] || typeof db.dicts[id] !== "object") db.dicts[id] = {};
-    if (!db.userLangHints[id] || typeof db.userLangHints[id] !== "object") db.userLangHints[id] = {};
     if (!db.settings[id] || typeof db.settings[id] !== "object") {
-      db.settings[id] = { autoLangMemory: true };
-    }
-    if (typeof db.settings[id].autoLangMemory !== "boolean") {
-      db.settings[id].autoLangMemory = true;
+      db.settings[id] = {};
     }
   }
 }
@@ -165,10 +158,6 @@ const DEDUPE_TTL = 4000;
 
 const inflightByChat = new Map();
 const MAX_INFLIGHT_PER_CHAT = 2;
-
-/* =========================
-   BASIC HELPERS
-========================= */
 
 function now() {
   return Date.now();
@@ -221,6 +210,10 @@ function setCachedTranslation(key, value) {
   setCachedItem(translationCache, key, value, CACHE_TTL, CACHE_MAX);
 }
 
+/* =========================
+   BASIC HELPERS
+========================= */
+
 function safeGetId(event) {
   try {
     return (
@@ -251,7 +244,7 @@ function isOwner(event) {
   return (event?.source?.userId || "") === OWNER;
 }
 
-function safeText(text) {
+function safeText(text = "") {
   return String(text || "").replace(/\0/g, "").slice(0, 5000);
 }
 
@@ -289,8 +282,12 @@ function normalizeDictKey(text = "") {
   return String(text || "").trim();
 }
 
+function escapeRegExp(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /* =========================
-   AUTH / STYLE / SETTINGS
+   AUTH / STYLE
 ========================= */
 
 function isAllowed(id) {
@@ -337,11 +334,6 @@ function setStyle(id, style) {
   ensureDBShape(id);
   db.styles[id] = style;
   saveDB();
-}
-
-function getChatSettings(id) {
-  ensureDBShape(id);
-  return db.settings[id] || { autoLangMemory: true };
 }
 
 /* =========================
@@ -420,17 +412,42 @@ function buildGlobalDictList() {
     .join("\n")}`;
 }
 
-function escapeRegExp(text = "") {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/* =========================
+   DICT NORMALIZE / EXACT HIT
+========================= */
+
+function normalizeForDict(text = "") {
+  return String(text || "")
+    .trim()
+    .replace(/[?？!！。．~～]+$/g, "")
+    .replace(/\s+/g, " ");
 }
 
-function applyDictionary(text = "", chatId = "") {
-  let out = String(text || "");
-  const merged = {
+function getMergedDict(chatId = "") {
+  return {
     ...getGlobalDict(),
     ...getDict(chatId),
   };
+}
 
+function getExactDictHit(text = "", chatId = "") {
+  const source = normalizeForDict(text);
+  if (!source) return "";
+
+  const merged = getMergedDict(chatId);
+
+  for (const [k, v] of Object.entries(merged)) {
+    if (normalizeForDict(k) === source) {
+      return String(v || "").trim();
+    }
+  }
+
+  return "";
+}
+
+function applyDictionaryAfterTranslate(text = "", chatId = "") {
+  let out = String(text || "");
+  const merged = getMergedDict(chatId);
   const entries = Object.entries(merged).sort((a, b) => b[0].length - a[0].length);
 
   for (const [src, dst] of entries) {
@@ -492,10 +509,6 @@ function isEmojiOrPunctuationOnly(text = "") {
 function shouldSkipStickerOrNonText(event) {
   const type = event?.message?.type || "";
   return type !== "text";
-}
-
-function stripMentionsOnly(text = "") {
-  return String(text || "").replace(/@\S+/g, "").trim();
 }
 
 function shouldSkipMentionOnlyMessage(event) {
@@ -573,6 +586,7 @@ function thaiFast(text) {
     "ไป": "去",
     "มา": "來",
     "โอเค": "好",
+    "โอเคค่ะ": "好",
   };
   return dict[t] || "";
 }
@@ -609,12 +623,13 @@ function enFast(text) {
 
 function shouldUseFastTranslate(text = "", lang = "unknown") {
   const t = String(text || "").trim();
-  if (!t) return false;
 
+  if (!t) return false;
   if (t.length <= 4) return true;
   if (lang === "zh" && /^[\u4E00-\u9FFF]{1,4}$/.test(t)) return true;
   if (lang === "th" && /^[\u0E00-\u0E7F]{1,8}$/.test(t)) return true;
   if (lang === "en" && /^[a-zA-Z\s]{1,12}$/.test(t)) return true;
+
   return false;
 }
 
@@ -808,7 +823,7 @@ async function handleCommand(event, text, chatId) {
     return smartReply(event, `已切換翻譯風格：${style}`);
   }
 
-  if (lower === "/dict list") {
+  if (text.toLowerCase().trim() === "/dict list") {
     return smartReply(event, buildDictList(chatId));
   }
 
@@ -830,7 +845,7 @@ async function handleCommand(event, text, chatId) {
     return smartReply(event, ok ? `已刪除群組詞典：${source}` : "找不到此詞");
   }
 
-  if (lower === "/gdict list") {
+  if (text.toLowerCase().trim() === "/gdict list") {
     if (!isOwner(event)) return smartReply(event, "只有 OWNER 可使用全域詞典指令");
     return smartReply(event, buildGlobalDictList());
   }
@@ -899,6 +914,13 @@ async function handleTextMessage(event) {
     return;
   }
 
+  const dictHit = getExactDictHit(text, chatId);
+  if (dictHit) {
+    console.log("📘 命中詞典，直接回覆");
+    await smartReply(event, dictHit);
+    return;
+  }
+
   if (isDuplicateMessage(chatId, text)) {
     console.log("⏭️ 略過重複訊息");
     return;
@@ -933,7 +955,7 @@ async function handleTextMessage(event) {
       return;
     }
 
-    translated = applyDictionary(translated, chatId);
+    translated = applyDictionaryAfterTranslate(translated, chatId);
 
     await smartReply(event, translated);
   } catch (e) {
