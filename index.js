@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 LINE BOT START v5.1.2");
+console.log("🚀 LINE BOT START v5.1.4");
 
 /* =========================
    OPENCC
@@ -146,7 +146,7 @@ const CACHE_TTL = 1000 * 60 * 10;
 const CACHE_MAX = 700;
 
 const recentMessageMap = new Map();
-const DEDUPE_TTL = 4000;
+const DEDUPE_TTL = 1800;
 
 const inflightByChat = new Map();
 const MAX_INFLIGHT_PER_CHAT = 2;
@@ -634,8 +634,39 @@ function restoreKeywords(text = "", placeholders = []) {
    QUALITY CHECK
 ========================= */
 
-function containsChinese(text = "") {
-  return /[\u4E00-\u9FFF]/.test(String(text || ""));
+function countChineseChars(text = "") {
+  const matches = String(text || "").match(/[\u4E00-\u9FFF]/g);
+  return matches ? matches.length : 0;
+}
+
+function hasTooMuchChineseLeft(text = "", limit = 6) {
+  return countChineseChars(text) >= limit;
+}
+
+/* =========================
+   CHINESE HINT NORMALIZE
+========================= */
+
+function normalizeChineseTimeWords(text = "") {
+  return String(text || "")
+    .replace(/剛剛/g, "剛剛(不久前)")
+    .replace(/剛才/g, "剛才(不久前)")
+    .replace(/先/g, "先(先做這件事)")
+    .replace(/現在/g, "現在(此刻)")
+    .replace(/等等/g, "等等(稍後)")
+    .replace(/已經/g, "已經(完成了)")
+    .replace(/還沒/g, "還沒(尚未)");
+}
+
+function cleanupChineseHints(text = "") {
+  return String(text || "")
+    .replace(/\(不久前\)/g, "")
+    .replace(/\(先做這件事\)/g, "")
+    .replace(/\(此刻\)/g, "")
+    .replace(/\(稍後\)/g, "")
+    .replace(/\(完成了\)/g, "")
+    .replace(/\(尚未\)/g, "")
+    .trim();
 }
 
 /* =========================
@@ -708,15 +739,17 @@ function shouldUseFastTranslate(text = "", lang = "unknown") {
 ========================= */
 
 function splitChineseSentence(text = "") {
-  const normalized = String(text || "")
+  let s = String(text || "");
+
+  s = s
     .replace(/([!！?？。．,，、])/g, " $1 ")
     .replace(/(然後|再來|接著|現在|之後)/g, " $1 ")
     .replace(/\s+/g, " ")
     .trim();
 
-  return normalized
+  return s
     .split(/\s+/)
-    .map((s) => s.trim())
+    .map((x) => x.trim())
     .filter(Boolean);
 }
 
@@ -762,8 +795,13 @@ function buildPrompt() {
 14. 我們 = พวกเรา
 15. 你們 = พวกคุณ
 16. 他們 = พวกเขา
-17. 保留原意，不要過度意譯
-18. 不要把中文句子只翻前面幾個字
+17. 中文的「剛剛」「剛才」表示不久前，可理解為「เมื่อกี้」或自然近義說法
+18. 中文的「先」要表達先做某事再做別的事
+19. 中文的「現在」表示此刻
+20. 中文的「等等」表示稍後
+21. 中文的「已經」表示已完成
+22. 中文的「還沒」表示尚未完成
+23. 保留原意，不要過度意譯
 `.trim();
 }
 
@@ -805,6 +843,7 @@ async function translateText(text, target, chatId = "") {
 
       let out = result?.choices?.[0]?.message?.content?.trim() || "";
       out = toTraditionalChinese(out);
+      out = cleanupChineseHints(out);
 
       if (isTranslationValid(source, out)) {
         setCachedTranslation(cacheKey, out);
@@ -842,13 +881,14 @@ async function translateChineseByParts(text, chatId = "") {
     }
 
     const translated = await translateText(sourcePart, "泰文", chatId);
+    const cleaned = cleanupChineseHints(translated);
 
-    if (!translated || containsChinese(translated)) {
-      console.log("⚠️ 分段翻譯失敗:", part, "=>", translated);
+    if (!cleaned || hasTooMuchChineseLeft(cleaned, 6)) {
+      console.log("⚠️ 分段翻譯失敗:", part, "=>", cleaned);
       return "";
     }
 
-    out.push(translated);
+    out.push(cleaned);
   }
 
   return out.join(" ").replace(/\s+/g, " ").trim();
@@ -1083,10 +1123,12 @@ async function handleTextMessage(event) {
       const { text: protectedText, placeholders } = protectKeywords(text);
 
       if (lang === "zh") {
-        translated = await translateChineseByParts(protectedText, chatId);
+        const normalizedSource = normalizeChineseTimeWords(protectedText);
+        translated = await translateChineseByParts(normalizedSource, chatId);
         translated = restoreKeywords(translated, placeholders);
+        translated = cleanupChineseHints(translated);
 
-        if (!translated || containsChinese(translated)) {
+        if (!translated || hasTooMuchChineseLeft(translated, 6)) {
           console.log("⚠️ 中文分段翻譯後仍失敗，跳過");
           pushChatContext(chatId, text);
           return;
@@ -1094,17 +1136,12 @@ async function handleTextMessage(event) {
       } else {
         translated = await translateText(protectedText, target, chatId);
         translated = restoreKeywords(translated, placeholders);
+        translated = cleanupChineseHints(translated);
       }
     }
 
     if (!translated || translated.trim() === text.trim()) {
       console.log("⚠️ 無有效翻譯，跳過");
-      pushChatContext(chatId, text);
-      return;
-    }
-
-    if (lang === "zh" && containsChinese(translated)) {
-      console.log("⚠️ 中文翻泰文後仍殘留中文，視為失敗");
       pushChatContext(chatId, text);
       return;
     }
@@ -1117,8 +1154,8 @@ async function handleTextMessage(event) {
       return;
     }
 
-    if (lang === "zh" && containsChinese(translated)) {
-      console.log("⚠️ 套用詞典後又出現中文，視為失敗");
+    if (lang === "zh" && hasTooMuchChineseLeft(translated, 6)) {
+      console.log("⚠️ 套用詞典後仍殘留過多中文，視為失敗");
       pushChatContext(chatId, text);
       return;
     }
@@ -1177,7 +1214,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-v5.1.2",
+    service: "line-translate-bot-v5.1.4",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflight: inflightByChat.size,
