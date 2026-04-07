@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 LINE BOT START");
+console.log("🚀 LINE BOT START v5.1");
 
 /* =========================
    OPENCC
@@ -79,10 +79,8 @@ function createDefaultDB() {
   return {
     allowed: [],
     pending: [],
-    styles: {},
     dicts: {},
     globalDict: {},
-    settings: {},
   };
 }
 
@@ -103,10 +101,8 @@ function loadDB() {
 
     if (!Array.isArray(parsed.allowed)) parsed.allowed = [];
     if (!Array.isArray(parsed.pending)) parsed.pending = [];
-    if (!parsed.styles || typeof parsed.styles !== "object") parsed.styles = {};
     if (!parsed.dicts || typeof parsed.dicts !== "object") parsed.dicts = {};
     if (!parsed.globalDict || typeof parsed.globalDict !== "object") parsed.globalDict = {};
-    if (!parsed.settings || typeof parsed.settings !== "object") parsed.settings = {};
 
     return parsed;
   } catch (e) {
@@ -131,16 +127,12 @@ function ensureDBShape(id = "") {
   if (!db || typeof db !== "object") db = createDefaultDB();
   if (!Array.isArray(db.allowed)) db.allowed = [];
   if (!Array.isArray(db.pending)) db.pending = [];
-  if (!db.styles || typeof db.styles !== "object") db.styles = {};
   if (!db.dicts || typeof db.dicts !== "object") db.dicts = {};
   if (!db.globalDict || typeof db.globalDict !== "object") db.globalDict = {};
-  if (!db.settings || typeof db.settings !== "object") db.settings = {};
 
   if (id) {
-    if (!db.styles[id]) db.styles[id] = "auto";
-    if (!db.dicts[id] || typeof db.dicts[id] !== "object") db.dicts[id] = {};
-    if (!db.settings[id] || typeof db.settings[id] !== "object") {
-      db.settings[id] = {};
+    if (!db.dicts[id] || typeof db.dicts[id] !== "object") {
+      db.dicts[id] = {};
     }
   }
 }
@@ -158,6 +150,14 @@ const DEDUPE_TTL = 4000;
 
 const inflightByChat = new Map();
 const MAX_INFLIGHT_PER_CHAT = 2;
+
+/* =========================
+   CONTEXT MEMORY
+========================= */
+
+const chatContextMap = new Map();
+const MAX_CONTEXT_MESSAGES = 3;
+const CONTEXT_TTL = 1000 * 60 * 30;
 
 function now() {
   return Date.now();
@@ -208,6 +208,36 @@ function getCachedTranslation(key) {
 
 function setCachedTranslation(key, value) {
   setCachedItem(translationCache, key, value, CACHE_TTL, CACHE_MAX);
+}
+
+function getChatContext(chatId) {
+  const item = chatContextMap.get(chatId);
+  if (!item) return [];
+  if (now() - item.ts > CONTEXT_TTL) {
+    chatContextMap.delete(chatId);
+    return [];
+  }
+  return Array.isArray(item.value) ? item.value : [];
+}
+
+function pushChatContext(chatId, text) {
+  if (!chatId || !text) return;
+  const current = getChatContext(chatId);
+  const next = [...current, String(text).trim()].slice(-MAX_CONTEXT_MESSAGES);
+  chatContextMap.set(chatId, { value: next, ts: now() });
+}
+
+function buildContextText(chatId, currentText) {
+  const items = getChatContext(chatId).filter(Boolean);
+  if (!items.length) return "";
+
+  const filtered = items.filter((x) => x.trim() !== String(currentText || "").trim());
+  if (!filtered.length) return "";
+
+  return filtered
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((x, i) => `${i + 1}. ${x}`)
+    .join("\n");
 }
 
 /* =========================
@@ -287,7 +317,7 @@ function escapeRegExp(text = "") {
 }
 
 /* =========================
-   AUTH / STYLE
+   AUTH
 ========================= */
 
 function isAllowed(id) {
@@ -311,7 +341,6 @@ function approveGroup(id) {
 
   db.pending = db.pending.filter((x) => x !== id);
   if (!db.allowed.includes(id)) db.allowed.push(id);
-  if (!db.styles[id]) db.styles[id] = "auto";
 
   saveDB();
   return true;
@@ -323,17 +352,6 @@ function rejectGroup(id) {
   db.pending = db.pending.filter((x) => x !== id);
   saveDB();
   return true;
-}
-
-function getStyle(id) {
-  ensureDBShape(id);
-  return db.styles[id] || "auto";
-}
-
-function setStyle(id, style) {
-  ensureDBShape(id);
-  db.styles[id] = style;
-  saveDB();
 }
 
 /* =========================
@@ -400,6 +418,13 @@ function deleteGlobalDict(source) {
   return true;
 }
 
+function clearGlobalDict() {
+  ensureDBShape();
+  db.globalDict = {};
+  saveDB();
+  return true;
+}
+
 function buildGlobalDictList() {
   const dict = getGlobalDict();
   const entries = Object.entries(dict);
@@ -411,10 +436,6 @@ function buildGlobalDictList() {
     .map(([k, v], i) => `${i + 1}. ${k} => ${v}`)
     .join("\n")}`;
 }
-
-/* =========================
-   DICT NORMALIZE / EXACT HIT
-========================= */
 
 function normalizeForDict(text = "") {
   return String(text || "")
@@ -479,10 +500,10 @@ function detectLang(text = "") {
   const hasZh = hasChinese(text);
   const hasEn = hasEnglish(text);
 
+  if (hasTh && hasZh) return "mixed";
   if (hasTh && !hasZh) return "th";
   if (hasZh && !hasTh) return "zh";
   if (!hasTh && !hasZh && hasEn) return "en";
-  if (hasTh && hasZh) return "mixed";
   return "unknown";
 }
 
@@ -490,13 +511,17 @@ function getTargetLanguage(lang) {
   if (lang === "zh") return "泰文";
   if (lang === "th") return "繁體中文";
   if (lang === "en") return "繁體中文";
-  if (lang === "mixed") return "繁體中文";
   return "繁體中文";
 }
 
 /* =========================
-   IGNORE / SKIP RULES
+   SKIP / CLEAN
 ========================= */
+
+function shouldSkipStickerOrNonText(event) {
+  const type = event?.message?.type || "";
+  return type !== "text";
+}
 
 function isEmojiOrPunctuationOnly(text = "") {
   const t = String(text || "").trim();
@@ -507,67 +532,41 @@ function isEmojiOrPunctuationOnly(text = "") {
   );
 }
 
-function shouldSkipStickerOrNonText(event) {
-  const type = event?.message?.type || "";
-  return type !== "text";
+function shouldSkipTranslateToken(text = "") {
+  const t = String(text || "").trim().toUpperCase();
+  return /^(?:\d+\s*)?(IN|OUT)(?:\s*\d+)?$/.test(t);
 }
 
-function shouldSkipMentionOnlyMessage(event) {
-  const text = String(event?.message?.text || "").trim();
-  const mention = event?.message?.mention;
-
-  if (!mention?.mentionees?.length) return false;
-
-  const cleaned = text
-    .replace(/@\S+/g, "")
-    .replace(
-      /[\p{Emoji}\p{Extended_Pictographic}\p{Emoji_Presentation}\s~`!@#$%^&*()_\-+=[\]{}\\|;:'",.<>/?，。！？、；：（）【】《》「」『』…—><]+/gu,
-      ""
-    )
+function cleanTextForTranslate(text = "") {
+  return String(text || "")
+    .replace(/@\S+/g, " ")
+    .replace(/#[^\s#]+/g, " ")
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, " ")
+    .replace(/\s{2,}/g, " ")
     .trim();
-
-  return !cleaned;
-}
-
-function removeMentionDisplayText(text = "", event = null) {
-  if (!event?.message?.mention?.mentionees?.length) return String(text || "");
-  return String(text || "").replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
 }
 
 function shouldIgnoreText(text = "") {
   const t = String(text || "").trim();
   if (!t) return true;
   if (isEmojiOrPunctuationOnly(t)) return true;
-
-  if (
-    /^[\p{Emoji}\p{Extended_Pictographic}\s!-/:-@[-`{-~]+$/u.test(t) &&
-    t.length <= 20
-  ) {
-    return true;
-  }
-
-  // 很短代碼 / 房號 / 純英文符號類內容直接略過
   if (/^[A-Z0-9_\- ]{1,20}$/.test(t)) return true;
-
+  if (/^[0-9]+$/.test(t)) return true;
+  if (t.length <= 1) return true;
   return false;
-}
-
-function shouldSkipTranslateToken(text = "") {
-  const t = String(text || "").trim().toUpperCase();
-  return /^(?:\d+\s*)?(IN|OUT)(?:\s*\d+)?$/.test(t);
 }
 
 function shouldSkipTranslateByContent(event) {
   if (shouldSkipStickerOrNonText(event)) return true;
 
   const originalText = String(event?.message?.text || "").trim();
+  if (!originalText) return true;
 
-  if (shouldSkipMentionOnlyMessage(event)) return true;
+  const cleaned = cleanTextForTranslate(originalText);
 
-  const text = removeMentionDisplayText(originalText, event);
-
-  if (shouldIgnoreText(text)) return true;
-  if (shouldSkipTranslateToken(text)) return true;
+  if (!cleaned) return true;
+  if (shouldIgnoreText(cleaned)) return true;
+  if (shouldSkipTranslateToken(cleaned)) return true;
 
   return false;
 }
@@ -576,38 +575,12 @@ function shouldSkipTranslateByContent(event) {
    GLOBAL PROTECT
 ========================= */
 
-// 完全不翻譯的固定字詞
 const NO_TRANSLATE_WORDS = [
   "IN",
   "OUT",
-  "VIP",
-  "VVIP",
-  "LINE",
-  "Telegram",
-  "WhatsApp",
-  "7-11",
-  "711",
   "MAN CLUB",
-  "OpenAI",
-  "ChatGPT",
-  "Render",
-  "Node",
-  "API",
-  "BOT",
-  "Bot",
-  "bot",
-  "IG",
-  "FB",
-  "TikTok",
-  "Instagram",
-  "GPS",
-  "WiFi",
-  "wifi",
-  "ID",
-  "UID",
 ];
 
-// 正則保護：帳號、網址、數字、時間等
 const NO_TRANSLATE_REGEX = [
   /@\w+/g,
   /#\w+/g,
@@ -631,12 +604,10 @@ function protectKeywords(text = "") {
     return key;
   };
 
-  // 先保護 regex
   for (const reg of NO_TRANSLATE_REGEX) {
     result = result.replace(reg, (m) => addPlaceholder(m));
   }
 
-  // 再保護固定詞
   for (const word of NO_TRANSLATE_WORDS) {
     const reg = new RegExp(`\\b${escapeRegExp(word)}\\b`, "gi");
     result = result.replace(reg, (m) => addPlaceholder(m));
@@ -653,6 +624,36 @@ function restoreKeywords(text = "", placeholders = []) {
   }
 
   return result;
+}
+
+/* =========================
+   SUBJECT PROTECTION
+========================= */
+
+function fixChineseSubject(text = "") {
+  return String(text || "")
+    .replace(/我們/g, "我們(說話的人這一方)")
+    .replace(/你們/g, "你們(對方那一方)")
+    .replace(/他們/g, "他們(第三人複數)")
+    .replace(/她們/g, "她們(第三人複數)")
+    .replace(/我/g, "我(說話的人)")
+    .replace(/你/g, "你(對方)")
+    .replace(/他/g, "他(第三人男性)")
+    .replace(/她/g, "她(第三人女性)")
+    .replace(/它/g, "它(物件或動物)");
+}
+
+function cleanupSubjectHints(text = "") {
+  return String(text || "")
+    .replace(/\(說話的人這一方\)/g, "")
+    .replace(/\(對方那一方\)/g, "")
+    .replace(/\(第三人複數\)/g, "")
+    .replace(/\(說話的人\)/g, "")
+    .replace(/\(對方\)/g, "")
+    .replace(/\(第三人男性\)/g, "")
+    .replace(/\(第三人女性\)/g, "")
+    .replace(/\(物件或動物\)/g, "")
+    .trim();
 }
 
 /* =========================
@@ -733,60 +734,72 @@ function isTranslationValid(sourceText = "", translatedText = "") {
   return true;
 }
 
-function buildPrompt(style = "auto") {
-  const styleTextMap = {
-    auto: "自然聊天口吻",
-    soft: "溫柔聊天口吻",
-    direct: "簡短直接口吻",
-    polite: "禮貌自然口吻",
-  };
-
-  const styleText = styleTextMap[style] || styleTextMap.auto;
-
+function buildPrompt() {
   return `
-你是中泰聊天翻譯助手。
+你是中泰即時聊天翻譯器。
 
 規則：
 1. 只輸出翻譯結果
 2. 不要解釋
-3. 不要加引號
-4. 不要加前言
-5. 保持聊天口吻
-6. 如果原文是中文，翻成泰文
-7. 如果原文是泰文，翻成繁體中文
-8. 如果原文是英文短句，翻成繁體中文
-9. 專有名詞、品牌名、人名、地名、代碼、帳號、網址可保留
-10. 語氣風格：${styleText}
+3. 不要加前言
+4. 不要潤飾
+5. 不要改寫
+6. 不要補充原文沒有的資訊
+7. 主詞必須忠於原文
+8. 若主詞不明，不要自己猜錯
+9. 中文翻泰文時：
+- 我 = ฉัน
+- 你 = คุณ
+- 他 = เขา
+- 她 = เขา
+- 我們 = พวกเรา
+- 你們 = พวกคุณ
+- 他們 = พวกเขา
+10. 帳號、網址、數字、代碼、品牌名保留
+11. 若內容本身已經是目標語言，不要重翻
+12. 請優先保留原本句意，不要意譯過頭
 `.trim();
 }
 
-async function translateText(text, target, style = "auto") {
+async function translateText(text, target, chatId = "") {
   const source = safeText(text).trim();
   if (!source) return "";
 
-  const cacheKey = `${target}__${style}__${source}`;
+  const contextText = buildContextText(chatId, source);
+  const cacheKey = `${target}__${source}__${contextText}`;
   const cached = getCachedTranslation(cacheKey);
   if (cached) return cached;
 
   for (let i = 0; i < 2; i++) {
     try {
+      const messages = [
+        {
+          role: "system",
+          content: buildPrompt(),
+        },
+      ];
+
+      if (contextText) {
+        messages.push({
+          role: "user",
+          content: `這是最近對話，只供你理解代名詞與上下文，不需要翻譯：\n${contextText}`,
+        });
+      }
+
+      messages.push({
+        role: "user",
+        content: `請翻譯成${target}：\n${source}`,
+      });
+
       const result = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        temperature: 0.1,
-        messages: [
-          {
-            role: "system",
-            content: buildPrompt(style),
-          },
-          {
-            role: "user",
-            content: `請翻譯成${target}：\n${source}`,
-          },
-        ],
+        temperature: 0,
+        messages,
       });
 
       let out = result?.choices?.[0]?.message?.content?.trim() || "";
       out = toTraditionalChinese(out);
+      out = cleanupSubjectHints(out);
 
       if (isTranslationValid(source, out)) {
         setCachedTranslation(cacheKey, out);
@@ -799,12 +812,6 @@ async function translateText(text, target, style = "auto") {
   }
 
   return "";
-}
-
-function fallbackMessage(lang) {
-  if (lang === "zh") return "稍等一下我再翻一次 🙏";
-  if (lang === "th") return "ขอเวลาสักครู่ เดี๋ยวฉันแปลให้อีกครั้ง 🙏";
-  return "Please wait a moment, I’ll translate it again 🙏";
 }
 
 /* =========================
@@ -862,16 +869,13 @@ async function handleCommand(event, text, chatId) {
         "/approve",
         "/reject",
         "/pending",
-        "/style auto",
-        "/style soft",
-        "/style direct",
-        "/style polite",
         "/dict list",
         "/dict add 中文=泰文",
         "/dict del 中文",
         "/gdict list",
         "/gdict add 中文=泰文",
         "/gdict del 中文",
+        "/gdict clear",
       ].join("\n")
     );
   }
@@ -898,16 +902,6 @@ async function handleCommand(event, text, chatId) {
     ensureDBShape();
     if (!db.pending.length) return smartReply(event, "目前沒有待授權群組");
     return smartReply(event, `待授權群組：\n${db.pending.join("\n")}`);
-  }
-
-  if (/^\/style\s+/i.test(text)) {
-    const style = text.replace(/^\/style\s+/i, "").trim().toLowerCase();
-    const allow = ["auto", "soft", "direct", "polite"];
-    if (!allow.includes(style)) {
-      return smartReply(event, "可用風格：auto / soft / direct / polite");
-    }
-    setStyle(chatId, style);
-    return smartReply(event, `已切換翻譯風格：${style}`);
   }
 
   if (text.toLowerCase().trim() === "/dict list") {
@@ -959,6 +953,12 @@ async function handleCommand(event, text, chatId) {
     return smartReply(event, ok ? `已刪除全域詞典：${source}` : "找不到此詞");
   }
 
+  if (lower === "/gdict clear") {
+    if (!isOwner(event)) return smartReply(event, "只有 OWNER 可使用全域詞典指令");
+    clearGlobalDict();
+    return smartReply(event, "✅ 已清空全域詞典");
+  }
+
   return false;
 }
 
@@ -978,7 +978,7 @@ async function handleTextMessage(event) {
   }
 
   if (shouldSkipTranslateByContent(event)) {
-    console.log("⏭️ 略過翻譯：貼圖 / 非文字 / 純標記 / 純表情 / 純代碼");
+    console.log("⏭️ 略過翻譯：貼圖 / 非文字 / 純表情 / 純符號 / 無需翻譯內容");
     return;
   }
 
@@ -994,16 +994,17 @@ async function handleTextMessage(event) {
     return;
   }
 
-  const text = removeMentionDisplayText(originalText, event).trim();
+  const text = cleanTextForTranslate(originalText);
 
   if (!text) {
-    console.log("⏭️ 移除標記後沒有可翻譯內容");
+    console.log("⏭️ 清理後沒有可翻譯內容");
     return;
   }
 
   const dictHit = getExactDictHit(text, chatId);
   if (dictHit) {
     console.log("📘 命中詞典，直接回覆");
+    pushChatContext(chatId, text);
     await smartReply(event, dictHit);
     return;
   }
@@ -1019,10 +1020,16 @@ async function handleTextMessage(event) {
   }
 
   try {
-    const style = getStyle(chatId);
     const lang = detectLang(text);
 
     if (lang === "unknown") return;
+
+    // 超穩定策略：中泰混雜直接略過，不硬翻
+    if (lang === "mixed") {
+      console.log("⏭️ 中泰混雜訊息，為避免亂翻直接略過");
+      pushChatContext(chatId, text);
+      return;
+    }
 
     let translated = "";
 
@@ -1034,24 +1041,34 @@ async function handleTextMessage(event) {
 
     if (!translated) {
       const target = getTargetLanguage(lang);
-
-      // 先保護不該翻的詞
       const { text: protectedText, placeholders } = protectKeywords(text);
 
-      // 翻譯
-      translated = await translateText(protectedText, target, style);
+      let finalSource = protectedText;
 
-      // 還原
+      if (lang === "zh") {
+        finalSource = fixChineseSubject(protectedText);
+      }
+
+      translated = await translateText(finalSource, target, chatId);
       translated = restoreKeywords(translated, placeholders);
+      translated = cleanupSubjectHints(translated);
     }
 
     if (!translated || translated.trim() === text.trim()) {
-      await smartReply(event, fallbackMessage(lang));
+      console.log("⚠️ 無有效翻譯，跳過");
+      pushChatContext(chatId, text);
       return;
     }
 
     translated = applyDictionaryAfterTranslate(translated, chatId);
 
+    if (!translated || translated.trim() === text.trim()) {
+      console.log("⚠️ 套用詞典後仍無有效翻譯，跳過");
+      pushChatContext(chatId, text);
+      return;
+    }
+
+    pushChatContext(chatId, text);
     await smartReply(event, translated);
   } catch (e) {
     console.error("❌ handleTextMessage error:", e?.message || e);
@@ -1105,10 +1122,11 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot",
+    service: "line-translate-bot-v5.1",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflight: inflightByChat.size,
+    contextChats: chatContextMap.size,
   });
 });
 
