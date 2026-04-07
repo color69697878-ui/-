@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 LINE BOT START v5.1");
+console.log("🚀 LINE BOT START v5.1.1");
 
 /* =========================
    OPENCC
@@ -627,33 +627,12 @@ function restoreKeywords(text = "", placeholders = []) {
 }
 
 /* =========================
-   SUBJECT PROTECTION
+   QUALITY CHECK
 ========================= */
 
-function fixChineseSubject(text = "") {
-  return String(text || "")
-    .replace(/我們/g, "我們(說話的人這一方)")
-    .replace(/你們/g, "你們(對方那一方)")
-    .replace(/他們/g, "他們(第三人複數)")
-    .replace(/她們/g, "她們(第三人複數)")
-    .replace(/我/g, "我(說話的人)")
-    .replace(/你/g, "你(對方)")
-    .replace(/他/g, "他(第三人男性)")
-    .replace(/她/g, "她(第三人女性)")
-    .replace(/它/g, "它(物件或動物)");
-}
-
-function cleanupSubjectHints(text = "") {
-  return String(text || "")
-    .replace(/\(說話的人這一方\)/g, "")
-    .replace(/\(對方那一方\)/g, "")
-    .replace(/\(第三人複數\)/g, "")
-    .replace(/\(說話的人\)/g, "")
-    .replace(/\(對方\)/g, "")
-    .replace(/\(第三人男性\)/g, "")
-    .replace(/\(第三人女性\)/g, "")
-    .replace(/\(物件或動物\)/g, "")
-    .trim();
+function hasTooMuchChinese(text = "") {
+  const matches = String(text || "").match(/[\u4E00-\u9FFF]/g);
+  return !!(matches && matches.length >= 3);
 }
 
 /* =========================
@@ -742,22 +721,21 @@ function buildPrompt() {
 1. 只輸出翻譯結果
 2. 不要解釋
 3. 不要加前言
-4. 不要潤飾
-5. 不要改寫
-6. 不要補充原文沒有的資訊
-7. 主詞必須忠於原文
-8. 若主詞不明，不要自己猜錯
-9. 中文翻泰文時：
-- 我 = ฉัน
-- 你 = คุณ
-- 他 = เขา
-- 她 = เขา
-- 我們 = พวกเรา
-- 你們 = พวกคุณ
-- 他們 = พวกเขา
-10. 帳號、網址、數字、代碼、品牌名保留
-11. 若內容本身已經是目標語言，不要重翻
-12. 請優先保留原本句意，不要意譯過頭
+4. 必須完整翻譯整句
+5. 不要只翻一部分
+6. 除了專有名詞、地名、人名、品牌名、網址、數字外，不可保留原文中文
+7. 如果原文是中文，請完整翻成自然泰文
+8. 如果原文是泰文，請完整翻成繁體中文
+9. 主詞必須忠於原文
+10. 我 = ฉัน
+11. 你 = คุณ
+12. 他 = เขา
+13. 她 = เขา
+14. 我們 = พวกเรา
+15. 你們 = พวกคุณ
+16. 他們 = พวกเขา
+17. 保留原意，不要過度意譯
+18. 不要把中文句子只翻前面幾個字
 `.trim();
 }
 
@@ -799,7 +777,6 @@ async function translateText(text, target, chatId = "") {
 
       let out = result?.choices?.[0]?.message?.content?.trim() || "";
       out = toTraditionalChinese(out);
-      out = cleanupSubjectHints(out);
 
       if (isTranslationValid(source, out)) {
         setCachedTranslation(cacheKey, out);
@@ -1024,7 +1001,6 @@ async function handleTextMessage(event) {
 
     if (lang === "unknown") return;
 
-    // 超穩定策略：中泰混雜直接略過，不硬翻
     if (lang === "mixed") {
       console.log("⏭️ 中泰混雜訊息，為避免亂翻直接略過");
       pushChatContext(chatId, text);
@@ -1045,13 +1021,20 @@ async function handleTextMessage(event) {
 
       let finalSource = protectedText;
 
-      if (lang === "zh") {
-        finalSource = fixChineseSubject(protectedText);
-      }
-
       translated = await translateText(finalSource, target, chatId);
       translated = restoreKeywords(translated, placeholders);
-      translated = cleanupSubjectHints(translated);
+
+      if (lang === "zh" && hasTooMuchChinese(translated)) {
+        console.log("⚠️ 發現翻譯結果殘留過多中文，重試一次");
+
+        translated = await translateText(
+          `這是純中文句子，請完整翻成泰文，不可保留中文原句，也不可只翻前面幾個字：\n${protectedText}`,
+          "泰文",
+          chatId
+        );
+
+        translated = restoreKeywords(translated, placeholders);
+      }
     }
 
     if (!translated || translated.trim() === text.trim()) {
@@ -1122,7 +1105,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-v5.1",
+    service: "line-translate-bot-v5.1.1",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflight: inflightByChat.size,
