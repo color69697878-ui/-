@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 LINE BOT START v5.1.4");
+console.log("🚀 LINE BOT START v5.1.5");
 
 /* =========================
    OPENCC
@@ -670,6 +670,34 @@ function cleanupChineseHints(text = "") {
 }
 
 /* =========================
+   THAI NORMALIZE
+========================= */
+
+function normalizeThaiPhrases(text = "") {
+  return String(text || "")
+    .replace(/นะค่ะ/g, "นะคะ")
+    .replace(/ไม่มีคนช่วยดูแลร้าน/g, "ไม่มีคนช่วยดูแลร้าน(沒有人幫忙顧店)")
+    .replace(/ทำงานนะ/g, "ทำงานนะ(要工作喔)")
+    .replace(/ยังไม่/g, "ยังไม่(還沒)")
+    .replace(/ได้แล้ว/g, "ได้แล้ว(已經可以了)")
+    .replace(/ต้อง/g, "ต้อง(必須/要)")
+    .replace(/เพราะ/g, "เพราะ(因為)")
+    .replace(/เลย/g, "เลย(所以/因此)");
+}
+
+function cleanupThaiHints(text = "") {
+  return String(text || "")
+    .replace(/\(沒有人幫忙顧店\)/g, "")
+    .replace(/\(要工作喔\)/g, "")
+    .replace(/\(還沒\)/g, "")
+    .replace(/\(已經可以了\)/g, "")
+    .replace(/\(必須\/要\)/g, "")
+    .replace(/\(因為\)/g, "")
+    .replace(/\(所以\/因此\)/g, "")
+    .trim();
+}
+
+/* =========================
    FAST TRANSLATE
 ========================= */
 
@@ -735,6 +763,60 @@ function shouldUseFastTranslate(text = "", lang = "unknown") {
 }
 
 /* =========================
+   CODE + SHORT TAIL MODE
+========================= */
+
+function isCodeWithShortChinese(text = "") {
+  const t = String(text || "").trim();
+  return /^[A-Za-z0-9/_\-.\s]+[\u4E00-\u9FFF]{1,6}$/.test(t);
+}
+
+function splitCodeAndChineseTail(text = "") {
+  const t = String(text || "").trim();
+  const m = t.match(/^([A-Za-z0-9/_\-.\s]+)([\u4E00-\u9FFF]{1,6})$/);
+  if (!m) return null;
+
+  return {
+    code: m[1].trim(),
+    tail: m[2].trim(),
+  };
+}
+
+function zhShortTailToThai(text = "") {
+  const dict = {
+    "灰色": "สีเทา",
+    "黑色": "สีดำ",
+    "白色": "สีขาว",
+    "紅色": "สีแดง",
+    "红色": "สีแดง",
+    "藍色": "สีน้ำเงิน",
+    "蓝色": "สีน้ำเงิน",
+    "綠色": "สีเขียว",
+    "绿色": "สีเขียว",
+    "黃色": "สีเหลือง",
+    "黄色": "สีเหลือง",
+    "粉色": "สีชมพู",
+    "粉紅色": "สีชมพู",
+    "粉红色": "สีชมพู",
+    "咖啡色": "สีน้ำตาล",
+    "棕色": "สีน้ำตาล",
+    "米色": "สีเบจ",
+    "紫色": "สีม่วง",
+    "橘色": "สีส้ม",
+    "橙色": "สีส้ม",
+    "銀色": "สีเงิน",
+    "银色": "สีเงิน",
+    "金色": "สีทอง",
+    "透明": "โปร่งใส",
+    "大": "ใหญ่",
+    "中": "กลาง",
+    "小": "เล็ก",
+  };
+
+  return dict[String(text || "").trim()] || "";
+}
+
+/* =========================
    SENTENCE SPLIT
 ========================= */
 
@@ -784,7 +866,7 @@ function buildPrompt() {
 3. 不要加前言
 4. 必須完整翻譯整句或短句
 5. 不要只翻一部分
-6. 除了專有名詞、地名、人名、品牌名、網址、數字外，不可保留原文中文
+6. 除了專有名詞、地名、人名、品牌名、網址、數字、型號外，不可保留原文中文
 7. 如果原文是中文，請完整翻成自然泰文
 8. 如果原文是泰文，請完整翻成繁體中文
 9. 主詞必須忠於原文
@@ -801,7 +883,10 @@ function buildPrompt() {
 20. 中文的「等等」表示稍後
 21. 中文的「已經」表示已完成
 22. 中文的「還沒」表示尚未完成
-23. 保留原意，不要過度意譯
+23. 泰文聊天中若出現「ไม่มีคนช่วย...」要理解成「沒有人幫忙...」
+24. 泰文聊天中若出現「ทำงานนะ」通常是「要工作喔 / 去工作喔」
+25. 如果原文是代碼、型號、尺寸、編號加短詞，只翻譯可翻的短詞，代碼原樣保留，不要解釋內容
+26. 保留原意，不要過度意譯
 `.trim();
 }
 
@@ -844,6 +929,7 @@ async function translateText(text, target, chatId = "") {
       let out = result?.choices?.[0]?.message?.content?.trim() || "";
       out = toTraditionalChinese(out);
       out = cleanupChineseHints(out);
+      out = cleanupThaiHints(out);
 
       if (isTranslationValid(source, out)) {
         setCachedTranslation(cacheKey, out);
@@ -1081,6 +1167,21 @@ async function handleTextMessage(event) {
     return;
   }
 
+  if (isCodeWithShortChinese(text)) {
+    const parts = splitCodeAndChineseTail(text);
+
+    if (parts) {
+      const tailThai = zhShortTailToThai(parts.tail);
+
+      if (tailThai) {
+        const finalText = `${parts.code} ${tailThai}`.trim();
+        pushChatContext(chatId, text);
+        await smartReply(event, finalText);
+        return;
+      }
+    }
+  }
+
   const dictHit = getExactDictHit(text, chatId);
   if (dictHit) {
     console.log("📘 命中詞典，直接回覆");
@@ -1134,9 +1235,10 @@ async function handleTextMessage(event) {
           return;
         }
       } else {
-        translated = await translateText(protectedText, target, chatId);
+        const normalizedThai = normalizeThaiPhrases(protectedText);
+        translated = await translateText(normalizedThai, target, chatId);
         translated = restoreKeywords(translated, placeholders);
-        translated = cleanupChineseHints(translated);
+        translated = cleanupThaiHints(translated);
       }
     }
 
@@ -1214,7 +1316,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-v5.1.4",
+    service: "line-translate-bot-v5.1.5",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflight: inflightByChat.size,
