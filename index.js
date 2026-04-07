@@ -7,7 +7,7 @@ import { Converter } from "opencc-js";
 
 dotenv.config();
 
-console.log("🚀 LINE BOT START v5.1.1");
+console.log("🚀 LINE BOT START v5.1.2");
 
 /* =========================
    OPENCC
@@ -158,6 +158,10 @@ const MAX_INFLIGHT_PER_CHAT = 2;
 const chatContextMap = new Map();
 const MAX_CONTEXT_MESSAGES = 3;
 const CONTEXT_TTL = 1000 * 60 * 30;
+
+/* =========================
+   TIME / CACHE HELPERS
+========================= */
 
 function now() {
   return Date.now();
@@ -630,9 +634,8 @@ function restoreKeywords(text = "", placeholders = []) {
    QUALITY CHECK
 ========================= */
 
-function hasTooMuchChinese(text = "") {
-  const matches = String(text || "").match(/[\u4E00-\u9FFF]/g);
-  return !!(matches && matches.length >= 3);
+function containsChinese(text = "") {
+  return /[\u4E00-\u9FFF]/.test(String(text || ""));
 }
 
 /* =========================
@@ -701,6 +704,31 @@ function shouldUseFastTranslate(text = "", lang = "unknown") {
 }
 
 /* =========================
+   SENTENCE SPLIT
+========================= */
+
+function splitChineseSentence(text = "") {
+  const normalized = String(text || "")
+    .replace(/([!！?？。．,，、])/g, " $1 ")
+    .replace(/(然後|再來|接著|現在|之後)/g, " $1 ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function isOnlyPunctuationPart(text = "") {
+  return /^[!！?？。．,，、]+$/.test(String(text || "").trim());
+}
+
+function isConnectorPart(text = "") {
+  return /^(然後|再來|接著|現在|之後)$/.test(String(text || "").trim());
+}
+
+/* =========================
    TRANSLATE CORE
 ========================= */
 
@@ -721,7 +749,7 @@ function buildPrompt() {
 1. 只輸出翻譯結果
 2. 不要解釋
 3. 不要加前言
-4. 必須完整翻譯整句
+4. 必須完整翻譯整句或短句
 5. 不要只翻一部分
 6. 除了專有名詞、地名、人名、品牌名、網址、數字外，不可保留原文中文
 7. 如果原文是中文，請完整翻成自然泰文
@@ -789,6 +817,41 @@ async function translateText(text, target, chatId = "") {
   }
 
   return "";
+}
+
+async function translateChineseByParts(text, chatId = "") {
+  const parts = splitChineseSentence(text);
+  if (!parts.length) return "";
+
+  const out = [];
+
+  for (const part of parts) {
+    if (!part.trim()) continue;
+
+    if (isOnlyPunctuationPart(part)) {
+      out.push(part);
+      continue;
+    }
+
+    let sourcePart = part;
+
+    if (isConnectorPart(part)) {
+      sourcePart = `這是中文連接詞，請翻成自然泰文：\n${part}`;
+    } else {
+      sourcePart = `這是純中文短句，請完整翻成自然泰文，不可保留中文：\n${part}`;
+    }
+
+    const translated = await translateText(sourcePart, "泰文", chatId);
+
+    if (!translated || containsChinese(translated)) {
+      console.log("⚠️ 分段翻譯失敗:", part, "=>", translated);
+      return "";
+    }
+
+    out.push(translated);
+  }
+
+  return out.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /* =========================
@@ -1019,20 +1082,17 @@ async function handleTextMessage(event) {
       const target = getTargetLanguage(lang);
       const { text: protectedText, placeholders } = protectKeywords(text);
 
-      let finalSource = protectedText;
+      if (lang === "zh") {
+        translated = await translateChineseByParts(protectedText, chatId);
+        translated = restoreKeywords(translated, placeholders);
 
-      translated = await translateText(finalSource, target, chatId);
-      translated = restoreKeywords(translated, placeholders);
-
-      if (lang === "zh" && hasTooMuchChinese(translated)) {
-        console.log("⚠️ 發現翻譯結果殘留過多中文，重試一次");
-
-        translated = await translateText(
-          `這是純中文句子，請完整翻成泰文，不可保留中文原句，也不可只翻前面幾個字：\n${protectedText}`,
-          "泰文",
-          chatId
-        );
-
+        if (!translated || containsChinese(translated)) {
+          console.log("⚠️ 中文分段翻譯後仍失敗，跳過");
+          pushChatContext(chatId, text);
+          return;
+        }
+      } else {
+        translated = await translateText(protectedText, target, chatId);
         translated = restoreKeywords(translated, placeholders);
       }
     }
@@ -1043,10 +1103,22 @@ async function handleTextMessage(event) {
       return;
     }
 
+    if (lang === "zh" && containsChinese(translated)) {
+      console.log("⚠️ 中文翻泰文後仍殘留中文，視為失敗");
+      pushChatContext(chatId, text);
+      return;
+    }
+
     translated = applyDictionaryAfterTranslate(translated, chatId);
 
     if (!translated || translated.trim() === text.trim()) {
       console.log("⚠️ 套用詞典後仍無有效翻譯，跳過");
+      pushChatContext(chatId, text);
+      return;
+    }
+
+    if (lang === "zh" && containsChinese(translated)) {
+      console.log("⚠️ 套用詞典後又出現中文，視為失敗");
       pushChatContext(chatId, text);
       return;
     }
@@ -1105,7 +1177,7 @@ app.get("/", (req, res) => {
 app.get("/healthz", (req, res) => {
   res.status(200).json({
     ok: true,
-    service: "line-translate-bot-v5.1.1",
+    service: "line-translate-bot-v5.1.2",
     uptime: process.uptime(),
     cacheSize: translationCache.size,
     inflight: inflightByChat.size,
