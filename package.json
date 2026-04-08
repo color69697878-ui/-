@@ -1,7 +1,7 @@
 {
-  "name": "line-zh-th-translator-bot",
-  "version": "5.1.6",
-  "description": "LINE 中泰雙向翻譯機器人",
+  "name": "line-multilang-translator-bot",
+  "version": "6.5.0",
+  "description": "LINE 多語翻譯機器人（UI批准版）",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
