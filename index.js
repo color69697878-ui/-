@@ -1,15 +1,7 @@
 "use strict";
 
 /**
- * LINE 翻譯機器人 v6.2（安全版）
- *
- * ✅ Flex UI 控制面板
- * ✅ 群組白名單（未授權群完全不回）
- * ✅ 管理員權限（只有你能控制）
- * ✅ 群組語言設定
- * ✅ 英文自動翻中文
- * ✅ IN / OUT 保留
- * ✅ 防亂操作
+ * v6.4 指令安全版
  */
 
 const fs = require("fs");
@@ -18,7 +10,6 @@ const express = require("express");
 const line = require("@line/bot-sdk");
 const OpenAI = require("openai");
 
-// ===== 基本 =====
 const PORT = process.env.PORT || 3000;
 const ADMIN_ID = process.env.ADMIN_USER_ID;
 
@@ -31,7 +22,6 @@ const client = new line.Client(config);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const app = express();
 
-// ===== 資料 =====
 const DATA = path.join(__dirname, "data");
 if (!fs.existsSync(DATA)) fs.mkdirSync(DATA);
 
@@ -39,10 +29,8 @@ const FILE = path.join(DATA, "db.json");
 
 let db = load();
 
-// ===== 預設保留字 =====
 const KEEP = ["IN","OUT","VIP","OK","XL","L","M","S","PCS"];
 
-// ===== Webhook =====
 app.post("/webhook", line.middleware(config), async (req, res) => {
   await Promise.all(req.body.events.map(handle));
   res.end();
@@ -50,7 +38,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
 app.listen(PORT);
 
-// ===== 主處理 =====
+// ===== 主流程 =====
 async function handle(e){
 
   if(e.type !== "message") return;
@@ -60,52 +48,28 @@ async function handle(e){
   const gid = e.source.groupId;
   const uid = e.source.userId;
 
-  // ===== 白名單檢查 =====
+  if(!gid) return;
+
+  // ===== 自動記錄 =====
+  db.pending = db.pending || {};
   if(!db.allowGroups?.[gid]){
-    return;
-  }
-
-  // ===== UI =====
-  if(text === "面板"){
-    if(uid !== ADMIN_ID) return reply(e,"無權限");
-    return replyFlex(e, buildPanel(gid));
-  }
-
-  // ===== UI 操作 =====
-  if(text.startsWith("SET_LANG")){
-    if(uid !== ADMIN_ID) return;
-
-    const [,a,b] = text.split(":");
-    init(gid);
-    db.groups[gid].langA = a;
-    db.groups[gid].langB = b;
+    db.pending[gid] = true;
     save();
-
-    return reply(e,`已設定 ${a} <-> ${b}`);
   }
 
-  if(text === "TOGGLE_ON"){
-    if(uid !== ADMIN_ID) return;
-    init(gid);
-    db.groups[gid].enable = true;
-    save();
-    return reply(e,"已開啟");
+  // ===== 指令系統 =====
+  if(text.startsWith("/")){
+    return handleCommand(e, text, gid, uid);
   }
 
-  if(text === "TOGGLE_OFF"){
-    if(uid !== ADMIN_ID) return;
-    init(gid);
-    db.groups[gid].enable = false;
-    save();
-    return reply(e,"已關閉");
-  }
+  // ===== 未授權 =====
+  if(!db.allowGroups?.[gid]) return;
 
-  // ===== 未開啟不翻 =====
+  // ===== 未開啟 =====
   if(!db.groups?.[gid]?.enable) return;
 
   const lang = detect(text);
 
-  // 英文強制翻中文
   if(lang === "en"){
     return translate(e,text,"en","zh");
   }
@@ -119,6 +83,68 @@ async function handle(e){
 
   if(lang === g.langB){
     return translate(e,text,g.langB,g.langA);
+  }
+}
+
+// ===== 指令處理 =====
+async function handleCommand(e, text, gid, uid){
+
+  const args = text.split(" ");
+  const cmd = args[0];
+
+  // ===== 批准 =====
+  if(cmd === "/批准"){
+    if(uid !== ADMIN_ID) return;
+
+    db.allowGroups[gid] = true;
+    delete db.pending[gid];
+    save();
+
+    return reply(e,"✅ 已授權此群");
+  }
+
+  // ===== 面板 =====
+  if(cmd === "/面板"){
+    if(uid !== ADMIN_ID) return reply(e,"無權限");
+    return replyFlex(e, buildPanel(gid));
+  }
+
+  // ===== 語言 =====
+  if(cmd === "/setlang"){
+    if(uid !== ADMIN_ID) return;
+
+    const a = args[1];
+    const b = args[2];
+
+    init(gid);
+    db.groups[gid].langA = a;
+    db.groups[gid].langB = b;
+    save();
+
+    return reply(e,`已設定 ${a} <-> ${b}`);
+  }
+
+  if(cmd === "/lang"){
+    const g = db.groups[gid];
+    if(!g) return reply(e,"未設定");
+    return reply(e,`${g.langA} <-> ${g.langB}`);
+  }
+
+  // ===== 開關 =====
+  if(cmd === "/on"){
+    if(uid !== ADMIN_ID) return;
+    init(gid);
+    db.groups[gid].enable = true;
+    save();
+    return reply(e,"已開啟");
+  }
+
+  if(cmd === "/off"){
+    if(uid !== ADMIN_ID) return;
+    init(gid);
+    db.groups[gid].enable = false;
+    save();
+    return reply(e,"已關閉");
   }
 }
 
@@ -225,7 +251,7 @@ function init(g){
 
 function load(){
   try{return JSON.parse(fs.readFileSync(FILE))}
-  catch{return {allowGroups:{},groups:{}}}
+  catch{return {allowGroups:{},groups:{},pending:{}}}
 }
 
 function save(){
