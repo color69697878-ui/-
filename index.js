@@ -1,5 +1,17 @@
 "use strict";
 
+/**
+ * LINE 翻譯機器人 v6.2（安全版）
+ *
+ * ✅ Flex UI 控制面板
+ * ✅ 群組白名單（未授權群完全不回）
+ * ✅ 管理員權限（只有你能控制）
+ * ✅ 群組語言設定
+ * ✅ 英文自動翻中文
+ * ✅ IN / OUT 保留
+ * ✅ 防亂操作
+ */
+
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -8,6 +20,7 @@ const OpenAI = require("openai");
 
 // ===== 基本 =====
 const PORT = process.env.PORT || 3000;
+const ADMIN_ID = process.env.ADMIN_USER_ID;
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -22,7 +35,7 @@ const app = express();
 const DATA = path.join(__dirname, "data");
 if (!fs.existsSync(DATA)) fs.mkdirSync(DATA);
 
-const DB_FILE = path.join(DATA, "db.json");
+const FILE = path.join(DATA, "db.json");
 
 let db = load();
 
@@ -35,53 +48,60 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   res.end();
 });
 
-app.get("/", (req,res)=>res.send("v6.1 Flex UI running"));
-
 app.listen(PORT);
 
-// ===== 主流程 =====
+// ===== 主處理 =====
 async function handle(e){
 
   if(e.type !== "message") return;
-
-  if(e.message.type === "sticker") return;
-
   if(e.message.type !== "text") return;
 
   const text = e.message.text.trim();
   const gid = e.source.groupId;
+  const uid = e.source.userId;
 
-  // ===== UI 面板 =====
+  // ===== 白名單檢查 =====
+  if(!db.allowGroups?.[gid]){
+    return;
+  }
+
+  // ===== UI =====
   if(text === "面板"){
+    if(uid !== ADMIN_ID) return reply(e,"無權限");
     return replyFlex(e, buildPanel(gid));
   }
 
-  // ===== UI 按鈕事件 =====
+  // ===== UI 操作 =====
   if(text.startsWith("SET_LANG")){
+    if(uid !== ADMIN_ID) return;
+
     const [,a,b] = text.split(":");
-    initGroup(gid);
-    db[gid].langA = a;
-    db[gid].langB = b;
+    init(gid);
+    db.groups[gid].langA = a;
+    db.groups[gid].langB = b;
     save();
+
     return reply(e,`已設定 ${a} <-> ${b}`);
   }
 
   if(text === "TOGGLE_ON"){
-    initGroup(gid);
-    db[gid].enable = true;
+    if(uid !== ADMIN_ID) return;
+    init(gid);
+    db.groups[gid].enable = true;
     save();
-    return reply(e,"翻譯已開啟");
+    return reply(e,"已開啟");
   }
 
   if(text === "TOGGLE_OFF"){
-    initGroup(gid);
-    db[gid].enable = false;
+    if(uid !== ADMIN_ID) return;
+    init(gid);
+    db.groups[gid].enable = false;
     save();
-    return reply(e,"翻譯已關閉");
+    return reply(e,"已關閉");
   }
 
-  // ===== 授權 =====
-  if(!db[gid]?.enable) return;
+  // ===== 未開啟不翻 =====
+  if(!db.groups?.[gid]?.enable) return;
 
   const lang = detect(text);
 
@@ -90,7 +110,7 @@ async function handle(e){
     return translate(e,text,"en","zh");
   }
 
-  const g = db[gid];
+  const g = db.groups[gid];
   if(!g) return;
 
   if(lang === g.langA){
@@ -105,114 +125,87 @@ async function handle(e){
 // ===== 翻譯 =====
 async function translate(e,text,from,to){
 
-  const pack = protect(text);
-  const safe = pack.text;
+  const p = protect(text);
 
   const res = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
+    model:"gpt-4.1-mini",
     messages:[
-      {role:"system",content:"只輸出翻譯結果"},
-      {role:"user",content:`${from} -> ${to}\n${safe}`}
+      {role:"system",content:"只輸出翻譯"},
+      {role:"user",content:`${from}->${to}\n${p.text}`}
     ]
   });
 
   let out = res.choices[0].message.content.trim();
-
-  out = restore(out,pack.map);
+  out = restore(out,p.map);
 
   return reply(e,out);
 }
 
-// ===== Flex UI =====
+// ===== UI =====
 function buildPanel(gid){
 
-  const g = db[gid] || {};
-  const status = g.enable ? "🟢 已開啟" : "🔴 已關閉";
+  const g = db.groups?.[gid] || {};
+  const status = g.enable ? "🟢 ON" : "🔴 OFF";
   const lang = g.langA ? `${g.langA} ⇄ ${g.langB}` : "未設定";
 
   return {
-    type: "bubble",
-    body: {
-      type: "box",
-      layout: "vertical",
-      contents: [
-        {type:"text",text:"翻譯控制面板",weight:"bold",size:"lg"},
+    type:"bubble",
+    body:{
+      type:"box",
+      layout:"vertical",
+      contents:[
+        {type:"text",text:"控制面板",weight:"bold"},
         {type:"text",text:`狀態：${status}`},
         {type:"text",text:`語言：${lang}`},
 
-        {
-          type:"box",
-          layout:"horizontal",
-          contents:[
-            btn("中文⇄泰文","SET_LANG:zh:th"),
-            btn("英文⇄中文","SET_LANG:en:zh")
-          ]
-        },
-
-        {
-          type:"box",
-          layout:"horizontal",
-          contents:[
-            btn("緬甸⇄中文","SET_LANG:my:zh"),
-            btn("開啟","TOGGLE_ON")
-          ]
-        },
-
-        {
-          type:"box",
-          layout:"horizontal",
-          contents:[
-            btn("關閉","TOGGLE_OFF")
-          ]
-        }
+        box([
+          btn("中⇄泰","SET_LANG:zh:th"),
+          btn("英⇄中","SET_LANG:en:zh")
+        ]),
+        box([
+          btn("緬⇄中","SET_LANG:my:zh"),
+          btn("開啟","TOGGLE_ON")
+        ]),
+        box([
+          btn("關閉","TOGGLE_OFF")
+        ])
       ]
     }
   };
 }
 
+function box(arr){
+  return {type:"box",layout:"horizontal",contents:arr};
+}
+
 function btn(label,data){
   return {
     type:"button",
-    style:"primary",
-    action:{
-      type:"message",
-      label,
-      text:data
-    }
+    action:{type:"message",label,text:data}
   };
 }
 
 // ===== 保護 =====
 function protect(text){
-  let map = {};
-  let i=0;
-
-  let t=text;
+  let map={},i=0;
 
   KEEP.forEach(k=>{
-    const r = new RegExp(`\\b${k}\\b`,"g");
-    t=t.replace(r,m=>{
+    const r=new RegExp(`\\b${k}\\b`,"g");
+    text=text.replace(r,m=>{
       const p=`__${i++}__`;
       map[p]=m;
       return p;
     });
   });
 
-  t=t.replace(/@\S+/g,m=>{
-    const p=`__${i++}__`;
-    map[p]=m;
-    return p;
-  });
-
-  return {text:t,map};
+  return {text,map};
 }
 
-function restore(text,map){
-  let out=text;
+function restore(t,map){
   Object.entries(map).forEach(([k,v])=>{
-    out=out.split(k).join(v);
+    t=t.split(k).join(v);
   });
-  return out;
+  return t;
 }
 
 // ===== 語言 =====
@@ -225,17 +218,18 @@ function detect(t){
 }
 
 // ===== DB =====
-function initGroup(g){
-  if(!db[g]) db[g]={enable:true};
+function init(g){
+  db.groups = db.groups || {};
+  if(!db.groups[g]) db.groups[g]={enable:true};
 }
 
 function load(){
-  try{return JSON.parse(fs.readFileSync(DB_FILE))}
-  catch{return {}}
+  try{return JSON.parse(fs.readFileSync(FILE))}
+  catch{return {allowGroups:{},groups:{}}}
 }
 
 function save(){
-  fs.writeFileSync(DB_FILE,JSON.stringify(db,null,2));
+  fs.writeFileSync(FILE,JSON.stringify(db,null,2));
 }
 
 // ===== reply =====
