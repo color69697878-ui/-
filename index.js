@@ -21,7 +21,7 @@ const path = require("path");
 const express = require("express");
 const line = require("@line/bot-sdk");
 const OpenAI = require("openai");
-
+// deploy fix
 // =========================
 // 基本設定
 // =========================
@@ -1177,3 +1177,4 @@ function saveDb() {
 function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+// v6.5 deploy
