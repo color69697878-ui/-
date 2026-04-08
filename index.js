@@ -94,14 +94,19 @@ async function handleCommand(e, text, gid, uid){
 
   // ===== 批准 =====
   if(cmd === "/批准"){
-    if(uid !== ADMIN_ID) return;
+  if(uid !== ADMIN_ID) return;
 
-    db.allowGroups[gid] = true;
-    delete db.pending[gid];
-    save();
+  db.allowGroups[gid] = true;
+  delete db.pending[gid];
 
-    return reply(e,"✅ 已授權此群");
-  }
+  init(gid); // 確保群組設定存在
+  db.groups[gid].enable = true;
+
+  save();
+
+  // 👇 直接回 Flex UI（關鍵）
+  return replyFlex(e, buildPanel(gid));
+}
 
   // ===== 面板 =====
   if(cmd === "/面板"){
