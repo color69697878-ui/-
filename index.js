@@ -99,15 +99,17 @@ async function handleCommand(e, text, gid, uid){
   db.allowGroups[gid] = true;
   delete db.pending[gid];
 
-  init(gid); // 確保群組設定存在
-  db.groups[gid].enable = true;
+  db.groups = db.groups || {};
+  db.groups[gid] = {
+    enable: true,
+    langA: "zh",
+    langB: "th"
+  };
 
   save();
 
-  // 👇 直接回 Flex UI（關鍵）
   return replyFlex(e, buildPanel(gid));
 }
-
   // ===== 面板 =====
   if(cmd === "/面板"){
     if(uid !== ADMIN_ID) return reply(e,"無權限");
