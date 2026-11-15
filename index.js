@@ -18,7 +18,13 @@ const OpenAI = require("openai");
 
 // ===== 基本 =====
 const PORT = process.env.PORT || 3000;
-const ADMIN_ID = process.env.ADMIN_USER_ID;
+const ADMIN_IDS = new Set(
+  [process.env.ADMIN_USER_ID, process.env.ADMIN_USER_IDS]
+    .join(",")
+    .split(",")
+    .map(id => id.trim())
+    .filter(Boolean)
+);
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -58,6 +64,10 @@ async function handle(e){
   const gid = e.source.groupId;
   const uid = e.source.userId;
 
+  if(e.source.type === "user" && text === "我的ID" && uid){
+    return reply(e, uid);
+  }
+
   if(!gid) return;
 
   // ===== 自動記錄群組 =====
@@ -69,7 +79,7 @@ async function handle(e){
 
   // ===== 未授權提示 =====
   if(!db.allowGroups?.[gid]){
-    if(uid === ADMIN_ID){
+    if(ADMIN_IDS.has(uid)){
       if(text === "批准"){
         db.allowGroups[gid] = true;
         delete db.pending[gid];
@@ -84,13 +94,13 @@ async function handle(e){
 
   // ===== UI =====
   if(text === "面板"){
-    if(uid !== ADMIN_ID) return reply(e,"無權限");
+    if(!ADMIN_IDS.has(uid)) return reply(e,"無權限");
     return replyFlex(e, buildPanel(gid));
   }
 
   // ===== UI 操作 =====
   if(text.startsWith("SET_LANG")){
-    if(uid !== ADMIN_ID) return;
+    if(!ADMIN_IDS.has(uid)) return;
 
     const [,a,b] = text.split(":");
     init(gid);
@@ -102,7 +112,7 @@ async function handle(e){
   }
 
   if(text === "TOGGLE_ON"){
-    if(uid !== ADMIN_ID) return;
+    if(!ADMIN_IDS.has(uid)) return;
     init(gid);
     db.groups[gid].enable = true;
     save();
@@ -110,7 +120,7 @@ async function handle(e){
   }
 
   if(text === "TOGGLE_OFF"){
-    if(uid !== ADMIN_ID) return;
+    if(!ADMIN_IDS.has(uid)) return;
     init(gid);
     db.groups[gid].enable = false;
     save();
